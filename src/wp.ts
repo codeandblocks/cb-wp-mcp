@@ -143,9 +143,14 @@ export class WPClient {
 
 const clients = new Map<string, WPClient>();
 
+/** Forget cached clients (credentials or sites changed). */
+export function resetClients() {
+  clients.clear();
+}
+
 export function getClient(siteId?: string): WPClient {
   if (config.sites.length === 0) {
-    throw new Error('No WordPress site configured. Set WP_URL/WP_USER/WP_APP_PASSWORD or WP_SITES.');
+    throw new Error(`No WordPress site connected. Connect one at ${config.publicUrl ?? ''}/admin (or set WP_URL/WP_USER/WP_APP_PASSWORD).`);
   }
   const site = siteId ? config.sites.find((s) => s.id === siteId) : config.sites[0];
   if (!site) {

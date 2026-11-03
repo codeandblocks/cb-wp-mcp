@@ -7,7 +7,7 @@
 import { z } from 'zod';
 
 export const APP_NAME = 'Code & Blocks WordPress MCP';
-export const APP_VERSION = '1.1.0';
+export const APP_VERSION = '1.2.0';
 
 const siteSchema = z.object({
   id: z
@@ -130,6 +130,8 @@ function build() {
     allowTokenInUrl: bool('ALLOW_TOKEN_IN_URL', false),
     dataDir: env('DATA_DIR') ?? '/data',
     readOnly: bool('READ_ONLY', false),
+    /** READ_ONLY from the environment (the UI setting can only add to it). */
+    envReadOnly: bool('READ_ONLY', false),
     allowPrivateFetch: bool('ALLOW_PRIVATE_FETCH', false),
     maxOutputChars: int('MAX_OUTPUT_CHARS', 60000),
     maxUploadBytes: int('MAX_UPLOAD_MB', 50) * 1024 * 1024,
@@ -139,7 +141,12 @@ function build() {
     pexelsApiKey: env('PEXELS_API_KEY'),
     unsplashAccessKey: env('UNSPLASH_ACCESS_KEY'),
     skillsDir: env('SKILLS_DIR'),
-    sites: parseSites(),
+    secretKey: env('SECRET_KEY'),
+    approvalWaitSeconds: int('APPROVAL_WAIT_SECONDS', 40),
+    /** Sites from WP_SITES / WP_URL – imported into the encrypted store on start. */
+    envSites: parseSites(),
+    /** Active sites (filled from the store at start-up and whenever they change). */
+    sites: [] as SiteConfig[],
   };
 }
 

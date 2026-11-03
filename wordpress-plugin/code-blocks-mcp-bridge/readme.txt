@@ -4,14 +4,20 @@ Tags: mcp, ai, claude, rest-api, developer
 Requires at least: 6.0
 Tested up to: 7.1
 Requires PHP: 7.4
-Stable tag: 1.1.0
+Stable tag: 1.2.0
 License: GPLv2 or later
 
 Companion plugin for the self-hosted Code & Blocks WordPress MCP server.
 
 == Description ==
 
-Adds admin-only REST endpoints (namespace cbmcp/v1) used by the Code & Blocks WordPress MCP server:
+Connects WordPress to your self-hosted Code & Blocks WordPress MCP server and adds admin-only REST endpoints (namespace cbmcp/v1):
+
+* Admin page "Code & Blocks MCP": one-click connection to the MCP server, status, disconnect
+* Switches for file editing, snippets, database writes, safe mode and live notices
+* Activity log of every change made through the MCP server, admin-bar counter and live notices (Heartbeat)
+* Snippet and backup management in wp-admin
+* Plugin, theme and core updates for the MCP server's update overview
 
 * Read, write, edit, search and delete files in wp-content/themes, plugins, mu-plugins and languages
 * PHP syntax check before saving PHP files, JSON check for .json files

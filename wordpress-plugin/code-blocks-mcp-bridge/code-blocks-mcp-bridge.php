@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       Code & Blocks MCP Bridge
  * Plugin URI:        https://github.com/
- * Description:       Gesicherte REST-Endpunkte für den Code & Blocks WordPress MCP-Server: Theme-/Plugin-Dateien, PHP-Snippets, Optionen, Cache leeren und Theme wechseln. Nur für Administratoren (Application Passwords).
- * Version:           1.1.0
+ * Description:       Verbindet WordPress mit deinem selbst gehosteten Code & Blocks MCP-Server: Ein-Klick-Verbindung, Dateien, Page-Builder- und SEO-Felder, Snippets, Backups, Aktivitätsprotokoll, Live-Hinweise und Updates. Nur für Administratoren.
+ * Version:           1.2.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Code & Blocks by Marijan
@@ -11,7 +11,8 @@
  * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  * Text Domain:       cb-mcp-bridge
  *
- * Optional constants for wp-config.php:
+ * All switches are on the plugin page (Code & Blocks MCP → Sicherheit).
+ * Optional constants for wp-config.php override them:
  *   define( 'CBMCP_DISABLE_FILE_WRITE', true ); // read-only file access
  *   define( 'CBMCP_DISABLE_SNIPPETS', true );   // no snippet management
  *   define( 'CBMCP_SAFE_MODE', true );          // do not execute any snippet (rescue)
@@ -22,8 +23,13 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'CBMCP_VERSION', '1.1.0' );
+define( 'CBMCP_VERSION', '1.2.0' );
 define( 'CBMCP_FILE', __FILE__ );
+
+require_once __DIR__ . '/includes/class-cbmcp-settings.php';
+require_once __DIR__ . '/includes/class-cbmcp-activity.php';
+require_once __DIR__ . '/includes/class-cbmcp-updates.php';
+require_once __DIR__ . '/includes/class-cbmcp-admin.php';
 
 final class CBMCP_Bridge {
 
@@ -133,11 +139,11 @@ final class CBMCP_Bridge {
 	}
 
 	private static function file_write_enabled() {
-		return ! ( defined( 'CBMCP_DISABLE_FILE_WRITE' ) && CBMCP_DISABLE_FILE_WRITE );
+		return CBMCP_Settings::enabled( 'file_write' );
 	}
 
 	private static function snippets_enabled() {
-		return ! ( defined( 'CBMCP_DISABLE_SNIPPETS' ) && CBMCP_DISABLE_SNIPPETS );
+		return CBMCP_Settings::enabled( 'snippets' );
 	}
 
 	private static function is_within( $path, $dir ) {
@@ -300,7 +306,7 @@ final class CBMCP_Bridge {
 			'file_roots'       => self::allowed_roots(),
 			'file_write'       => self::file_write_enabled(),
 			'snippets'         => self::snippets_enabled(),
-			'safe_mode'        => defined( 'CBMCP_SAFE_MODE' ) && CBMCP_SAFE_MODE,
+			'safe_mode'        => CBMCP_Settings::enabled( 'safe_mode' ),
 			'tokenizer_lint'   => function_exists( 'token_get_all' ),
 			'wp_debug'         => defined( 'WP_DEBUG' ) && WP_DEBUG,
 			'memory_limit'     => ini_get( 'memory_limit' ),
@@ -399,7 +405,7 @@ final class CBMCP_Bridge {
 
 	public static function route_files_write( WP_REST_Request $req ) {
 		if ( ! self::file_write_enabled() ) {
-			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (CBMCP_DISABLE_FILE_WRITE).', 403 );
+			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$p = self::resolve( $req->get_param( 'path' ), false );
 		if ( is_wp_error( $p ) ) {
@@ -455,7 +461,7 @@ final class CBMCP_Bridge {
 
 	public static function route_files_delete( WP_REST_Request $req ) {
 		if ( ! self::file_write_enabled() ) {
-			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (CBMCP_DISABLE_FILE_WRITE).', 403 );
+			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$p = self::resolve( $req->get_param( 'path' ) );
 		if ( is_wp_error( $p ) ) {
@@ -492,7 +498,7 @@ final class CBMCP_Bridge {
 
 	public static function route_files_restore( WP_REST_Request $req ) {
 		if ( ! self::file_write_enabled() ) {
-			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (CBMCP_DISABLE_FILE_WRITE).', 403 );
+			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$p = self::resolve( $req->get_param( 'path' ), false );
 		if ( is_wp_error( $p ) ) {
@@ -643,7 +649,7 @@ final class CBMCP_Bridge {
 
 	/** Runs active snippets; a snippet that throws or fatals is switched off automatically. */
 	public static function run_snippets() {
-		if ( ( defined( 'CBMCP_SAFE_MODE' ) && CBMCP_SAFE_MODE ) || ! self::snippets_enabled() ) {
+		if ( CBMCP_Settings::enabled( 'safe_mode' ) || ! self::snippets_enabled() ) {
 			return;
 		}
 		$all = self::get_snippets();
@@ -705,7 +711,7 @@ final class CBMCP_Bridge {
 		}
 		return array(
 			'enabled'   => self::snippets_enabled(),
-			'safe_mode' => defined( 'CBMCP_SAFE_MODE' ) && CBMCP_SAFE_MODE,
+			'safe_mode' => CBMCP_Settings::enabled( 'safe_mode' ),
 			'snippets'  => $out,
 		);
 	}
@@ -727,7 +733,7 @@ final class CBMCP_Bridge {
 
 	public static function route_snippets_save( WP_REST_Request $req ) {
 		if ( ! self::snippets_enabled() ) {
-			return self::err( 'cbmcp_snippets_disabled', 'Snippets are disabled (CBMCP_DISABLE_SNIPPETS).', 403 );
+			return self::err( 'cbmcp_snippets_disabled', 'Snippets are disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$name = (string) $req->get_param( 'name' );
 		if ( ! self::valid_name( $name ) ) {
@@ -775,7 +781,7 @@ final class CBMCP_Bridge {
 		}
 		$active = filter_var( $req->get_param( 'active' ), FILTER_VALIDATE_BOOLEAN );
 		if ( $active && ! self::snippets_enabled() ) {
-			return self::err( 'cbmcp_snippets_disabled', 'Snippets are disabled (CBMCP_DISABLE_SNIPPETS).', 403 );
+			return self::err( 'cbmcp_snippets_disabled', 'Snippets are disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$all[ $name ]['active'] = $active;
 		if ( $active ) {
@@ -1172,7 +1178,7 @@ final class CBMCP_Bridge {
 	// ------------------------------------------------------------------
 
 	private static function db_write_enabled() {
-		return defined( 'CBMCP_ALLOW_DB_WRITE' ) && CBMCP_ALLOW_DB_WRITE;
+		return CBMCP_Settings::enabled( 'db_write' );
 	}
 
 	/** Remove string literals, quoted identifiers and comments for keyword checks. */
@@ -1263,7 +1269,7 @@ final class CBMCP_Bridge {
 		if ( ! $is_read ) {
 			if ( ! self::db_write_enabled() ) {
 				$wpdb->show_errors( $prev );
-				return self::err( 'cbmcp_db_readonly', "Write queries are disabled. Add define( 'CBMCP_ALLOW_DB_WRITE', true ); to wp-config.php to allow INSERT/UPDATE/DELETE/REPLACE.", 403 );
+				return self::err( 'cbmcp_db_readonly', "Write queries are disabled. The site owner can allow them in wp-admin: Code & Blocks MCP → Sicherheit → Datenbank schreiben.", 403 );
 			}
 			if ( ! filter_var( $req->get_param( 'allow_write' ), FILTER_VALIDATE_BOOLEAN ) ) {
 				$wpdb->show_errors( $prev );
@@ -1768,7 +1774,7 @@ final class CBMCP_Bridge {
 
 	public static function route_theme_copy( WP_REST_Request $req ) {
 		if ( ! self::file_write_enabled() ) {
-			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (CBMCP_DISABLE_FILE_WRITE).', 403 );
+			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$from = wp_get_theme( (string) $req->get_param( 'from' ) );
 		$slug = (string) $req->get_param( 'slug' );
@@ -1808,7 +1814,7 @@ final class CBMCP_Bridge {
 
 	public static function route_theme_child( WP_REST_Request $req ) {
 		if ( ! self::file_write_enabled() ) {
-			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (CBMCP_DISABLE_FILE_WRITE).', 403 );
+			return self::err( 'cbmcp_write_disabled', 'File writing is disabled (wp-admin: Code & Blocks MCP → Sicherheit).', 403 );
 		}
 		$parent = wp_get_theme( (string) $req->get_param( 'parent' ) );
 		if ( ! $parent->exists() ) {
@@ -1860,6 +1866,79 @@ final class CBMCP_Bridge {
 			'preview_url' => $preview['url'],
 		);
 	}
+
+
+	// ------------------------------------------------------------------
+	// Backup overview for wp-admin
+	// ------------------------------------------------------------------
+
+	const BACKUP_RE = '/^(.*)\.(\d{8}-\d{6}-\d{6})\.(bak|json)$/';
+
+	/** All backups (files and meta), newest first. */
+	public static function list_all_backups( $limit = 300 ) {
+		$dir = self::protected_dir( 'cbmcp-backups' );
+		$out = array();
+		foreach ( (array) scandir( $dir ) as $f ) {
+			if ( ! preg_match( self::BACKUP_RE, $f, $m ) ) {
+				continue;
+			}
+			$stamp = $m[2];
+			$time  = (int) gmmktime( (int) substr( $stamp, 9, 2 ), (int) substr( $stamp, 11, 2 ), (int) substr( $stamp, 13, 2 ), (int) substr( $stamp, 4, 2 ), (int) substr( $stamp, 6, 2 ), (int) substr( $stamp, 0, 4 ) );
+			if ( 'bak' === $m[3] ) {
+				$type   = 'file';
+				$target = str_replace( '__', '/', $m[1] );
+			} else {
+				$type = 'meta';
+				$data = json_decode( (string) @file_get_contents( $dir . '/' . $f ), true ); // phpcs:ignore
+				if ( ! is_array( $data ) ) {
+					continue;
+				}
+				$target = $data['object_type'] . ' #' . $data['object_id'] . ': ' . $data['key'];
+			}
+			$out[] = array(
+				'name'   => $f,
+				'type'   => $type,
+				'target' => $target,
+				'time'   => $time,
+				'stamp'  => $stamp,
+				'size'   => (int) @filesize( $dir . '/' . $f ), // phpcs:ignore
+			);
+		}
+		usort(
+			$out,
+			function ( $a, $b ) {
+				return strcmp( $b['stamp'], $a['stamp'] );
+			}
+		);
+		return array_slice( $out, 0, $limit );
+	}
+
+	/** Restore a file or meta backup by its file name. */
+	public static function restore_by_backup_name( $name ) {
+		if ( ! preg_match( self::BACKUP_RE, (string) $name, $m ) ) {
+			return self::err( 'cbmcp_no_backup', 'Unknown backup.', 404 );
+		}
+		$req = new WP_REST_Request( 'POST' );
+		$req->set_param( 'backup', $name );
+		if ( 'bak' === $m[3] ) {
+			$req->set_param( 'path', str_replace( '__', '/', $m[1] ) );
+			return self::route_files_restore( $req );
+		}
+		$data = json_decode( (string) @file_get_contents( self::protected_dir( 'cbmcp-backups' ) . '/' . basename( $name ) ), true ); // phpcs:ignore
+		if ( ! is_array( $data ) ) {
+			return self::err( 'cbmcp_bad_backup', 'Backup file is invalid.', 500 );
+		}
+		$req->set_param( 'object_type', $data['object_type'] );
+		$req->set_param( 'object_id', $data['object_id'] );
+		$req->set_param( 'key', $data['key'] );
+		return self::route_meta_restore( $req );
+	}
 }
 
 CBMCP_Bridge::init();
+CBMCP_Activity::init();
+CBMCP_Updates::init();
+if ( is_admin() ) {
+	CBMCP_Admin::init();
+}
+

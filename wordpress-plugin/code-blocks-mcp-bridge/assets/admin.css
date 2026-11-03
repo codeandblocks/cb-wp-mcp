@@ -1,0 +1,32 @@
+/* Code & Blocks MCP Bridge – admin page. Author: Code & Blocks by Marijan */
+.cbmcp-title { display: flex; align-items: center; gap: 8px; }
+.cbmcp-title .dashicons { font-size: 28px; width: 28px; height: 28px; color: #2f5d50; }
+.cbmcp-version { font-size: 12px; font-weight: 500; background: #e7efe9; color: #2f5d50; padding: 2px 8px; border-radius: 999px; }
+.cbmcp-body { max-width: 1100px; }
+.cbmcp-card { background: #fff; border: 1px solid #dcdcde; border-radius: 8px; padding: 18px 22px; margin: 18px 0; }
+.cbmcp-card h2 { margin-top: 0; font-size: 16px; }
+.cbmcp-status { font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 6px; margin: 0 0 12px; }
+.cbmcp-status.ok { color: #1a7f37; }
+.cbmcp-status.off { color: #8a8a8a; }
+.cbmcp-label { display: block; font-weight: 600; margin-bottom: 6px; }
+.cbmcp-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.cbmcp-inline { display: inline-block; margin: 10px 0 0; }
+.cbmcp-kv th { text-align: left; padding: 4px 24px 4px 0; font-weight: 600; }
+.cbmcp-kv td { padding: 4px 0; }
+.cbmcp-pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; background: #f0f0f1; color: #50575e; }
+.cbmcp-pill.ok { background: #e6f4ea; color: #1a7f37; }
+.cbmcp-pill.err { background: #fbeaea; color: #b32d2e; }
+.cbmcp-pill.wait { background: #fff4e5; color: #9a6700; }
+.cbmcp-nowrap { white-space: nowrap; }
+.cbmcp-code { max-height: 320px; overflow: auto; background: #1e1e1e; color: #e6e6e6; padding: 10px; border-radius: 6px; font-size: 12px; }
+.cbmcp-error { color: #b32d2e; margin: 4px 0 0; font-size: 12px; }
+.cbmcp-locked { color: #9a6700; }
+.cbmcp-footer { color: #8a8a8a; font-size: 12px; margin-top: 24px; }
+.cbmcp-switch { position: relative; display: inline-block; width: 42px; height: 24px; }
+.cbmcp-switch input { opacity: 0; width: 0; height: 0; }
+.cbmcp-switch span { position: absolute; inset: 0; background: #c3c4c7; border-radius: 999px; transition: background .15s; cursor: pointer; }
+.cbmcp-switch span::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .15s; }
+.cbmcp-switch input:checked + span { background: #2f5d50; }
+.cbmcp-switch input:checked + span::before { transform: translateX(18px); }
+.cbmcp-switch input:disabled + span { opacity: .5; cursor: not-allowed; }
+.cbmcp-switch input:focus-visible + span { outline: 2px solid #2271b1; outline-offset: 2px; }

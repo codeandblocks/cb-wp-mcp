@@ -14,6 +14,7 @@ import { config } from './config.js';
 import { getClient } from './wp.js';
 import { USER_AGENT } from './net.js';
 import type { Handler, ToolOpts } from './tools.js';
+import { gate, toolGated } from './approvals.js';
 
 type ToolFn = (name: string, opts: ToolOpts, handler: Handler) => void;
 
@@ -127,7 +128,7 @@ function flattenQuery(prefix: string, value: unknown, out: string[] = []): strin
 
 // ---------- skills ----------
 
-interface Skill {
+export interface Skill {
   name: string;
   description: string;
   content: string;
@@ -135,7 +136,7 @@ interface Skill {
 }
 
 const BUILTIN_SKILLS = config.skillsDir ?? path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../skills');
-const USER_SKILLS = path.join(config.dataDir, 'skills');
+export const USER_SKILLS = path.join(config.dataDir, 'skills');
 
 function parseSkill(file: string, source: Skill['source']): Skill | undefined {
   try {
@@ -157,7 +158,7 @@ function parseSkill(file: string, source: Skill['source']): Skill | undefined {
   }
 }
 
-function loadSkills(): Skill[] {
+export function loadSkills(): Skill[] {
   const map = new Map<string, Skill>();
   for (const [dir, source] of [[BUILTIN_SKILLS, 'built-in'], [USER_SKILLS, 'saved']] as const) {
     if (!fs.existsSync(dir)) continue;
@@ -175,6 +176,21 @@ function scoreSkill(s: Skill, query: string): number {
   const hay = `${s.name} ${s.description}`.toLowerCase();
   const body = s.content.toLowerCase();
   return words.reduce((acc, w) => acc + (hay.includes(w) ? 3 : 0) + (body.includes(w) ? 1 : 0), 0);
+}
+
+export function saveSkill(name: string, description: string, content: string) {
+  if (!/^[a-z0-9][a-z0-9-]{1,60}$/.test(name)) throw new Error('Name: a-z, 0-9 and "-" (2–61 characters)');
+  fs.mkdirSync(USER_SKILLS, { recursive: true });
+  const desc = description.replace(/\s+/g, ' ').trim();
+  fs.writeFileSync(path.join(USER_SKILLS, `${name}.md`), `---\nname: ${name}\ndescription: ${desc}\n---\n${content.trim()}\n`);
+}
+
+export function deleteSkill(name: string): boolean {
+  if (!/^[a-z0-9][a-z0-9-]{1,60}$/.test(name)) return false;
+  const f = path.join(USER_SKILLS, `${name}.md`);
+  if (!fs.existsSync(f)) return false;
+  fs.unlinkSync(f);
+  return true;
 }
 
 // ---------- page audit ----------
@@ -586,6 +602,10 @@ export function registerExtraTools(tool: ToolFn) {
       const ann = info?.meta?.annotations ?? {};
       const method = ann.readonly ? 'GET' : ann.destructive && ann.idempotent ? 'DELETE' : 'POST';
       if (config.readOnly && method !== 'GET') throw new Error('Server is in READ_ONLY mode – only read-only abilities can run');
+      if (method !== 'GET' && toolGated('run_ability')) {
+        const g = await gate('run_ability', a.site, a, `Ability ${a.name} (${ann.destructive ? 'destruktiv' : 'schreibend'})`);
+        if (!g.proceed) return g.message;
+      }
       const route = `/wp-abilities/v1/abilities/${a.name}/run`;
       const res =
         method === 'POST'
@@ -773,9 +793,7 @@ export function registerExtraTools(tool: ToolFn) {
       write: true,
     },
     async (a) => {
-      fs.mkdirSync(USER_SKILLS, { recursive: true });
-      const desc = a.description.replace(/\s+/g, ' ');
-      fs.writeFileSync(path.join(USER_SKILLS, `${a.name}.md`), `---\nname: ${a.name}\ndescription: ${desc}\n---\n${a.content.trim()}\n`);
+      saveSkill(a.name, a.description, a.content);
       return { saved: a.name, location: 'saved' };
     },
   );
@@ -784,10 +802,45 @@ export function registerExtraTools(tool: ToolFn) {
     'skill_delete',
     { title: 'Delete skill', description: 'Delete a saved skill (built-in skills cannot be deleted).', input: { name: z.string().regex(/^[a-z0-9][a-z0-9-]{1,60}$/) }, write: true, destructive: true },
     async (a) => {
-      const f = path.join(USER_SKILLS, `${a.name}.md`);
-      if (!fs.existsSync(f)) throw new Error(`No saved skill "${a.name}"`);
-      fs.unlinkSync(f);
+      if (!deleteSkill(a.name)) throw new Error(`No saved skill "${a.name}"`);
       return { deleted: a.name };
+    },
+  );
+
+  // ===== Updates (all sites) =====
+  tool(
+    'manage_updates',
+    {
+      title: 'Plugin/theme/core updates',
+      description:
+        '[Bridge] check: list available plugin, theme and WordPress updates for one site or all sites (all_sites=true). run: install updates (type plugin|theme|core, optional items = plugin files or theme stylesheets; empty = all of that type). Suggest a backup before core updates.',
+      input: {
+        site,
+        action: z.enum(['check', 'run']).default('check'),
+        all_sites: z.boolean().default(false),
+        refresh: z.boolean().default(false).describe('check: ask wordpress.org for fresh update data'),
+        type: z.enum(['plugin', 'theme', 'core']).optional(),
+        items: z.array(z.string()).optional(),
+      },
+      mixed: true,
+      destructive: true,
+    },
+    async (a) => {
+      if (a.action === 'run' && config.readOnly) throw new Error('Server is in READ_ONLY mode');
+      const ids = a.all_sites ? config.sites.map((x) => x.id) : [getClient(a.site).site.id];
+      const results: Record<string, unknown> = {};
+      for (const id of ids) {
+        try {
+          const wp = getClient(id);
+          results[id] =
+            a.action === 'check'
+              ? (await wp.get(`${B}/updates/list`, { refresh: a.refresh ? 1 : undefined })).data
+              : (await wp.request('POST', `${B}/updates/run`, { body: { type: a.type ?? 'plugin', items: a.items ?? [] }, timeoutMs: 600_000 })).data;
+        } catch (e) {
+          results[id] = { error: (e as Error).message };
+        }
+      }
+      return a.all_sites ? results : results[ids[0]];
     },
   );
 

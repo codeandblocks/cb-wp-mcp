@@ -23,6 +23,7 @@ import type {
 import type { AuthInfo } from '@modelcontextprotocol/sdk/server/auth/types.js';
 import { InvalidGrantError, InvalidTokenError } from '@modelcontextprotocol/sdk/server/auth/errors.js';
 import { APP_NAME, type Config } from './config.js';
+import { checkStoredToken } from './store.js';
 
 interface TokenRecord {
   clientId: string;
@@ -273,7 +274,7 @@ ${Object.entries(hidden)
   }
 
   async verifyAccessToken(token: string): Promise<AuthInfo> {
-    if (this.cfg.mcpToken && safeEqual(token, this.cfg.mcpToken)) {
+    if ((this.cfg.mcpToken && safeEqual(token, this.cfg.mcpToken)) || checkStoredToken(token)) {
       return { token, clientId: 'static-token', scopes: ['mcp'], expiresAt: now() + 3600 };
     }
     const rec = this.state.access[sha256(token)];
@@ -285,6 +286,26 @@ ${Object.entries(hidden)
       expiresAt: rec.expiresAt,
       resource: rec.resource ? new URL(rec.resource) : undefined,
     };
+  }
+
+  /** Overview for the admin UI. */
+  stats() {
+    const t = now();
+    const perClient = new Map<string, number>();
+    for (const r of Object.values(this.state.refresh)) if (r.expiresAt > t) perClient.set(r.clientId, (perClient.get(r.clientId) ?? 0) + 1);
+    return [...perClient.entries()].map(([id, sessions]) => ({
+      client_id: id,
+      name: this.state.clients[id]?.client_name ?? id,
+      registered: this.state.clients[id]?.client_id_issued_at,
+      sessions,
+    }));
+  }
+
+  /** Sign out every connected Claude client (they must log in again). */
+  revokeAll() {
+    this.state.access = {};
+    this.state.refresh = {};
+    this.save();
   }
 
   async revokeToken(_client: OAuthClientInformationFull, request: OAuthTokenRevocationRequest): Promise<void> {

@@ -8,6 +8,9 @@ import { APP_NAME, APP_VERSION, config } from './config.js';
 import { allSiteHosts, getClient, WPError, type Query, type WPClient } from './wp.js';
 import { readLimited, safeFetch, USER_AGENT } from './net.js';
 import { registerExtraTools, trackUnsplashDownload } from './extras.js';
+import { record } from './activity.js';
+import { gate, needsApproval } from './approvals.js';
+import { APPROVAL_TOOLS } from './store.js';
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
 
@@ -29,7 +32,8 @@ Before page-builder edits, SEO-plugin work or reading plugin data: call skill_li
 Safe workflow for live pages: duplicate_content (draft copy + preview link) → edit the copy (manage_meta for builder data) → audit_page / show the preview_url → apply_copy only after the user approves (a backup draft is kept).
 Draft themes: copy_theme or create_child_theme → edit files → preview_url → activate_theme only when the user says so.
 Plugin data in custom tables: db_schema (like=plugin name) → db_query with SELECT. Writes are off unless the site owner enabled them. Prefer a plugin's REST API or abilities (list_abilities / run_ability) over raw SQL writes.
-Ask before anything destructive or live (publishing, deleting, theme switch, applying a copy, sending emails, SQL writes).`;
+Ask before anything destructive or live (publishing, deleting, theme switch, applying a copy, sending emails, SQL writes).
+If a tool answers "APPROVAL REQUIRED", nothing happened yet: give the user the approval link, wait until they confirm in the chat, then repeat the call with the same arguments plus approval_id. Never work around a declined approval.`;
 
 // ---------- helpers ----------
 function out(data: unknown): ToolResult {
@@ -99,6 +103,50 @@ const typeParam = z
   .describe('REST base of the content type: posts, pages, media, or a custom post type rest_base (see list_content_types).');
 const namespaceParam = z.string().optional().describe('REST namespace of the type, default wp/v2.');
 
+function pickTheme(t: any) {
+  if (!t) return t;
+  const { stylesheet, template, name, version, is_block_theme, author, requires_php } = t;
+  return { stylesheet, template, name, version, is_block_theme, author, requires_php };
+}
+
+// ---------- activity helpers ----------
+function isWriteCall(opts: ToolOpts, a: Record<string, any>): boolean {
+  if (!opts.write && !opts.mixed) return false;
+  if (!opts.mixed) return true;
+  if (typeof a.method === 'string') return a.method.toUpperCase() !== 'GET';
+  if ('allow_write' in a) return Boolean(a.allow_write);
+  if (typeof a.action === 'string') return !['get', 'list', 'backups', 'check'].includes(a.action);
+  return true;
+}
+
+function describeCall(title: string, a: Record<string, any>): string {
+  const parts: string[] = [];
+  const pick = (k: string, label = '') => {
+    const v = a[k];
+    if (v === undefined || v === null || v === '' || typeof v === 'object') return;
+    parts.push(`${label}${String(v).slice(0, 80)}`);
+  };
+  pick('action');
+  pick('type');
+  for (const k of ['id', 'object_id', 'target_id', 'copy_id', 'post_id']) pick(k, '#');
+  for (const k of ['path', 'key', 'name', 'plugin', 'slug', 'stylesheet', 'theme', 'hook', 'taxonomy', 'to', 'method']) pick(k);
+  if (typeof a.title === 'string') parts.push(`"${a.title.slice(0, 60)}"`);
+  if (typeof a.sql === 'string') parts.push(a.sql.replace(/\s+/g, ' ').slice(0, 80));
+  return parts.length ? `${title}: ${parts.join(' · ')}` : title;
+}
+
+function resultRef(r: unknown): { id?: number; title?: string; link?: string; edit?: string } {
+  if (!r || typeof r !== 'object') return {};
+  const o = r as Record<string, any>;
+  const str = (v: unknown) => (typeof v === 'string' && v ? v : undefined);
+  return {
+    id: typeof o.id === 'number' ? o.id : typeof o.applied_to === 'number' ? o.applied_to : undefined,
+    title: str(o.title)?.slice(0, 80),
+    link: str(o.link) ?? str(o.url) ?? str(o.preview_url),
+    edit: str(o.edit_url),
+  };
+}
+
 // ---------- registration ----------
 export type Handler = (args: any) => Promise<unknown>;
 export interface ToolOpts {
@@ -116,12 +164,15 @@ export function buildServer(): McpServer {
 
   const tool = (name: string, opts: ToolOpts, handler: Handler) => {
     if (config.readOnly && opts.write && !opts.mixed) return;
+    const input = name in APPROVAL_TOOLS
+      ? { ...opts.input, approval_id: z.string().optional().describe('Only after the user approved: the approval id from the approval message') }
+      : opts.input;
     server.registerTool(
       name,
       {
         title: opts.title,
         description: opts.description,
-        inputSchema: opts.input,
+        inputSchema: input,
         annotations: {
           title: opts.title,
           readOnlyHint: !opts.write && !opts.mixed,
@@ -131,12 +182,26 @@ export function buildServer(): McpServer {
       },
       async (args: any) => {
         const started = Date.now();
+        const a = args ?? {};
+        const siteId: string | undefined = typeof a.site === 'string' ? a.site : config.sites[0]?.id;
+        const isWrite = isWriteCall(opts, a);
+        const summary = describeCall(opts.title, a);
         try {
-          const result = await handler(args);
-          console.log(`[tool] ${name} site=${args?.site ?? '-'} ok ${Date.now() - started}ms`);
+          if (isWrite && needsApproval(name, a)) {
+            const g = await gate(name, siteId, a, summary);
+            if (!g.proceed) return out(g.message);
+          }
+          const result = await handler(a);
+          console.log(`[tool] ${name} site=${siteId ?? '-'} ok ${Date.now() - started}ms`);
+          if (isWrite && !(typeof result === 'string' && result.startsWith('APPROVAL REQUIRED'))) {
+            const ref = resultRef(result);
+            record({ site: siteId, tool: name, kind: 'change', status: 'ok', summary: ref.title ? `${summary} – ${ref.title}` : summary, source: 'mcp', ms: Date.now() - started, link: ref.link, edit_link: ref.edit, object_id: ref.id });
+          }
           return out(result);
         } catch (e) {
-          console.log(`[tool] ${name} site=${args?.site ?? '-'} error ${Date.now() - started}ms: ${(e as Error)?.message}`);
+          const msg = (e as Error)?.message ?? String(e);
+          console.log(`[tool] ${name} site=${siteId ?? '-'} error ${Date.now() - started}ms: ${msg}`);
+          if (isWrite) record({ site: siteId, tool: name, kind: 'change', status: 'error', summary: `${summary} – Fehler: ${msg.slice(0, 160)}`, source: 'mcp', ms: Date.now() - started });
           return fail(e, opts.description.startsWith('[Bridge]'));
         }
       },
@@ -149,6 +214,7 @@ export function buildServer(): McpServer {
     { title: 'List sites', description: 'List the WordPress sites this server is configured for.', input: {} },
     async () => ({
       sites: config.sites.map((s, i) => ({ id: s.id, url: s.url, user: s.user, default: i === 0 })),
+      hint: config.sites.length ? undefined : `No site connected yet. Ask the user to connect one at ${config.publicUrl ?? ''}/admin.`,
       read_only: config.readOnly,
     }),
   );
@@ -172,7 +238,7 @@ export function buildServer(): McpServer {
       return {
         site: wp.site.id,
         general: val(root),
-        active_theme: theme.status === 'fulfilled' ? clean(theme.value.data)[0] : val(theme),
+        active_theme: theme.status === 'fulfilled' ? pickTheme(clean(theme.value.data)[0]) : val(theme),
         active_plugins: val(plugins),
         bridge: bridge.status === 'fulfilled' ? bridge.value.data : 'not installed or not reachable (file/snippet tools unavailable)',
       };

@@ -15,6 +15,16 @@ import crypto from 'node:crypto';
 import { APP_NAME, APP_VERSION, config } from './config.js';
 import { AuthProvider } from './oauth.js';
 import { buildServer } from './tools.js';
+import { initStore, onChange } from './store.js';
+import { initActivity } from './activity.js';
+import { initApprovals } from './approvals.js';
+import { adminRouter } from './admin.js';
+import { resetClients } from './wp.js';
+
+initStore();
+initActivity();
+initApprovals();
+onChange(resetClients);
 
 const app = express();
 app.set('trust proxy', config.trustProxy);
@@ -31,10 +41,11 @@ app.get('/health', (_req, res) => {
 });
 
 app.get('/', (_req, res) => {
-  res.type('text/plain').send(`${APP_NAME} ${APP_VERSION}\nMCP endpoint: /mcp\nCode & Blocks by Marijan\n`);
+  res.redirect(302, '/admin');
 });
 
 const provider = new AuthProvider(config);
+app.use('/admin', adminRouter(provider));
 const mcpUrl = config.publicUrl ? new URL('/mcp', config.publicUrl) : undefined;
 
 if (config.oauthEnabled && config.publicUrl && mcpUrl) {
@@ -139,6 +150,7 @@ app.listen(config.port, '0.0.0.0', () => {
   console.log(`${APP_NAME} ${APP_VERSION} listening on :${config.port}`);
   console.log(`  public URL : ${config.publicUrl ?? '(not set)'}`);
   console.log(`  auth       : ${[config.oauthEnabled && 'OAuth (password login)', config.mcpToken && 'static bearer token', config.allowTokenInUrl && config.mcpToken && 'token in URL'].filter(Boolean).join(', ')}`);
-  console.log(`  sites      : ${config.sites.map((s) => `${s.id} (${s.url})`).join(', ') || 'none configured!'}`);
+  console.log(`  sites      : ${config.sites.map((s) => `${s.id} (${s.url})`).join(', ') || 'none yet – connect one at /admin'}`);
+  console.log(`  admin UI   : ${config.adminPassword ? `${config.publicUrl ?? ''}/admin` : 'disabled (set ADMIN_PASSWORD)'}`);
   console.log(`  read-only  : ${config.readOnly}`);
 });
