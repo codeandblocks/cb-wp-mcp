@@ -1,0 +1,21 @@
+# Code & Blocks WordPress MCP – Code & Blocks by Marijan
+# Alternative zum Dockerfile-Build-Pack in Coolify, oder lokal: docker compose up --build
+services:
+  wp-mcp:
+    build: .
+    restart: unless-stopped
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      WP_URL: ${WP_URL:-}
+      WP_USER: ${WP_USER:-}
+      WP_APP_PASSWORD: ${WP_APP_PASSWORD:-}
+      WP_SITES: ${WP_SITES:-}
+      READ_ONLY: ${READ_ONLY:-false}
+    volumes:
+      - wp-mcp-data:/data
+    expose:
+      - "3000"
+volumes:
+  wp-mcp-data:
