@@ -4,3 +4,4 @@ dist
 .git
 wordpress-plugin
 *.zip
+test

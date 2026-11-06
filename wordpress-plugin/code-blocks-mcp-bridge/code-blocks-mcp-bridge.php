@@ -2,8 +2,8 @@
 /**
  * Plugin Name:       Code & Blocks MCP Bridge
  * Plugin URI:        https://github.com/
- * Description:       Verbindet WordPress mit deinem selbst gehosteten Code & Blocks MCP-Server: Ein-Klick-Verbindung, Dateien, Page-Builder- und SEO-Felder, Snippets, Backups, Aktivitätsprotokoll, Live-Hinweise und Updates. Nur für Administratoren.
- * Version:           1.2.0
+ * Description:       Verbindet WordPress mit einem Code & Blocks MCP-Server: Verbindung per Code, Anmeldung am Portal mit WordPress, Dateien, Page-Builder- und SEO-Felder, Snippets, Backups, Aktivitätsprotokoll, Live-Hinweise und Updates. Nur für Administratoren.
+ * Version:           1.3.0
  * Requires at least: 6.0
  * Requires PHP:      7.4
  * Author:            Code & Blocks by Marijan
@@ -23,13 +23,14 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'CBMCP_VERSION', '1.2.0' );
+define( 'CBMCP_VERSION', '1.3.0' );
 define( 'CBMCP_FILE', __FILE__ );
 
 require_once __DIR__ . '/includes/class-cbmcp-settings.php';
 require_once __DIR__ . '/includes/class-cbmcp-activity.php';
 require_once __DIR__ . '/includes/class-cbmcp-updates.php';
 require_once __DIR__ . '/includes/class-cbmcp-admin.php';
+require_once __DIR__ . '/includes/class-cbmcp-sso.php';
 
 final class CBMCP_Bridge {
 
@@ -1938,6 +1939,7 @@ final class CBMCP_Bridge {
 CBMCP_Bridge::init();
 CBMCP_Activity::init();
 CBMCP_Updates::init();
+CBMCP_SSO::init();
 if ( is_admin() ) {
 	CBMCP_Admin::init();
 }

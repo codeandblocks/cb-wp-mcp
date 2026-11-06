@@ -7,7 +7,7 @@
 import { z } from 'zod';
 
 export const APP_NAME = 'Code & Blocks WordPress MCP';
-export const APP_VERSION = '1.2.0';
+export const APP_VERSION = '1.3.0';
 
 const siteSchema = z.object({
   id: z

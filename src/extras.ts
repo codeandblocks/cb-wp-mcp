@@ -11,7 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { parse, type HTMLElement } from 'node-html-parser';
 import { config } from './config.js';
-import { getClient } from './wp.js';
+import { currentSites, getClient } from './wp.js';
+import { getKey, isReadOnly } from './workspaces.js';
 import { USER_AGENT } from './net.js';
 import type { Handler, ToolOpts } from './tools.js';
 import { gate, toolGated } from './approvals.js';
@@ -347,9 +348,9 @@ async function auditPage(url: URL) {
 
 export async function trackUnsplashDownload(location: string): Promise<void> {
   const u = new URL(location);
-  if (u.hostname !== 'api.unsplash.com' || !config.unsplashAccessKey) return;
+  if (u.hostname !== 'api.unsplash.com' || !getKey('unsplash')) return;
   try {
-    await fetch(u, { headers: { Authorization: `Client-ID ${config.unsplashAccessKey}`, 'Accept-Version': 'v1' }, signal: AbortSignal.timeout(15_000) });
+    await fetch(u, { headers: { Authorization: `Client-ID ${getKey('unsplash')}`, 'Accept-Version': 'v1' }, signal: AbortSignal.timeout(15_000) });
   } catch {
     /* tracking is best effort */
   }
@@ -368,14 +369,14 @@ function slugify(s: string): string {
 }
 
 async function searchPexels(q: { query: string; orientation?: string; per_page: number; page: number; locale?: string }) {
-  if (!config.pexelsApiKey) throw new Error('PEXELS_API_KEY is not set');
+  if (!getKey('pexels')) throw new Error('No Pexels API key for this account. Add one in the portal under Einstellungen.');
   const u = new URL('https://api.pexels.com/v1/search');
   u.searchParams.set('query', q.query);
   u.searchParams.set('per_page', String(q.per_page));
   u.searchParams.set('page', String(q.page));
   if (q.orientation) u.searchParams.set('orientation', q.orientation);
   if (q.locale) u.searchParams.set('locale', q.locale);
-  const res = await fetch(u, { headers: { Authorization: config.pexelsApiKey, 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) });
+  const res = await fetch(u, { headers: { Authorization: getKey('pexels') ?? '', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`Pexels: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
   const data: any = await res.json();
   return (data.photos ?? []).map((p: any) => ({
@@ -398,7 +399,7 @@ async function searchPexels(q: { query: string; orientation?: string; per_page: 
 }
 
 async function searchUnsplash(q: { query: string; orientation?: string; per_page: number; page: number }) {
-  if (!config.unsplashAccessKey) throw new Error('UNSPLASH_ACCESS_KEY is not set');
+  if (!getKey('unsplash')) throw new Error('No Unsplash access key for this account. Add one in the portal under Einstellungen.');
   const u = new URL('https://api.unsplash.com/search/photos');
   u.searchParams.set('query', q.query);
   u.searchParams.set('per_page', String(Math.min(30, q.per_page)));
@@ -406,7 +407,7 @@ async function searchUnsplash(q: { query: string; orientation?: string; per_page
   u.searchParams.set('content_filter', 'high');
   if (q.orientation) u.searchParams.set('orientation', q.orientation === 'square' ? 'squarish' : q.orientation);
   const res = await fetch(u, {
-    headers: { Authorization: `Client-ID ${config.unsplashAccessKey}`, 'Accept-Version': 'v1', 'User-Agent': USER_AGENT },
+    headers: { Authorization: `Client-ID ${getKey('unsplash')}`, 'Accept-Version': 'v1', 'User-Agent': USER_AGENT },
     signal: AbortSignal.timeout(20_000),
   });
   if (!res.ok) throw new Error(`Unsplash: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -504,7 +505,7 @@ export function registerExtraTools(tool: ToolFn) {
       }
 
       if (a.action === 'backups') return (await wp.post(`${B}/meta/backups`, { ...target, key: needKey() })).data;
-      if (config.readOnly) throw new Error('Server is in READ_ONLY mode');
+      if (isReadOnly()) throw new Error('Server is in READ_ONLY mode');
       if (a.action === 'restore') return (await wp.post(`${B}/meta/restore`, { ...target, key: needKey(), backup: a.backup })).data;
       if (a.action === 'delete') return (await wp.post(`${B}/meta/delete`, { ...target, key: needKey() })).data;
 
@@ -553,7 +554,7 @@ export function registerExtraTools(tool: ToolFn) {
       destructive: true,
     },
     async (a) => {
-      if (config.readOnly && a.allow_write) throw new Error('Server is in READ_ONLY mode');
+      if (isReadOnly() && a.allow_write) throw new Error('Server is in READ_ONLY mode');
       return (await getClient(a.site).post(`${B}/db/query`, { sql: a.sql, max_rows: a.max_rows, allow_write: a.allow_write })).data;
     },
   );
@@ -601,7 +602,7 @@ export function registerExtraTools(tool: ToolFn) {
       const info = (await wp.get(`/wp-abilities/v1/abilities/${a.name}`)).data as any;
       const ann = info?.meta?.annotations ?? {};
       const method = ann.readonly ? 'GET' : ann.destructive && ann.idempotent ? 'DELETE' : 'POST';
-      if (config.readOnly && method !== 'GET') throw new Error('Server is in READ_ONLY mode – only read-only abilities can run');
+      if (isReadOnly() && method !== 'GET') throw new Error('Server is in READ_ONLY mode – only read-only abilities can run');
       if (method !== 'GET' && toolGated('run_ability')) {
         const g = await gate('run_ability', a.site, a, `Ability ${a.name} (${ann.destructive ? 'destruktiv' : 'schreibend'})`);
         if (!g.proceed) return g.message;
@@ -635,7 +636,7 @@ export function registerExtraTools(tool: ToolFn) {
     async (a) => {
       const wp = getClient(a.site);
       if (a.action === 'list') return (await wp.get(`${B}/cron/list`, { search: a.search })).data;
-      if (config.readOnly) throw new Error('Server is in READ_ONLY mode');
+      if (isReadOnly()) throw new Error('Server is in READ_ONLY mode');
       if (!a.hook) throw new Error('hook is required');
       return (await wp.post(`${B}/cron/${a.action}`, { hook: a.hook, args: a.args ?? [], timestamp: a.timestamp })).data;
     },
@@ -780,33 +781,6 @@ export function registerExtraTools(tool: ToolFn) {
     },
   );
 
-  tool(
-    'skill_save',
-    {
-      title: 'Save skill',
-      description: 'Save a reusable workflow, site convention or preference as a skill (Markdown) so future conversations can load it. Overrides a built-in skill with the same name. Ask the user before saving.',
-      input: {
-        name: z.string().regex(/^[a-z0-9][a-z0-9-]{1,60}$/),
-        description: z.string().min(5).max(300),
-        content: z.string().min(10).max(100_000),
-      },
-      write: true,
-    },
-    async (a) => {
-      saveSkill(a.name, a.description, a.content);
-      return { saved: a.name, location: 'saved' };
-    },
-  );
-
-  tool(
-    'skill_delete',
-    { title: 'Delete skill', description: 'Delete a saved skill (built-in skills cannot be deleted).', input: { name: z.string().regex(/^[a-z0-9][a-z0-9-]{1,60}$/) }, write: true, destructive: true },
-    async (a) => {
-      if (!deleteSkill(a.name)) throw new Error(`No saved skill "${a.name}"`);
-      return { deleted: a.name };
-    },
-  );
-
   // ===== Updates (all sites) =====
   tool(
     'manage_updates',
@@ -826,8 +800,8 @@ export function registerExtraTools(tool: ToolFn) {
       destructive: true,
     },
     async (a) => {
-      if (a.action === 'run' && config.readOnly) throw new Error('Server is in READ_ONLY mode');
-      const ids = a.all_sites ? config.sites.map((x) => x.id) : [getClient(a.site).site.id];
+      if (a.action === 'run' && isReadOnly()) throw new Error('Server is in READ_ONLY mode');
+      const ids = a.all_sites ? currentSites().map((x) => x.id) : [getClient(a.site).site.id];
       const results: Record<string, unknown> = {};
       for (const id of ids) {
         try {
@@ -861,10 +835,10 @@ export function registerExtraTools(tool: ToolFn) {
       },
     },
     async (a) => {
-      const hasP = Boolean(config.pexelsApiKey);
-      const hasU = Boolean(config.unsplashAccessKey);
+      const hasP = Boolean(getKey('pexels'));
+      const hasU = Boolean(getKey('unsplash'));
       if (!hasP && !hasU) {
-        throw new Error('No image API key configured. Set PEXELS_API_KEY (https://www.pexels.com/api/) and/or UNSPLASH_ACCESS_KEY (https://unsplash.com/oauth/applications) in the server environment.');
+        throw new Error('No image API key for this account. The user can add a Pexels (https://www.pexels.com/api/) or Unsplash (https://unsplash.com/developers) key in the portal under Einstellungen.');
       }
       const want = a.source === 'auto' ? (hasP ? ['pexels'] : ['unsplash']) : a.source === 'both' ? ['pexels', 'unsplash'] : [a.source];
       const results: any[] = [];

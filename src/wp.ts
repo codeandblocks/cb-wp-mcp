@@ -3,6 +3,8 @@
  * Author: Code & Blocks by Marijan
  */
 import { config, type SiteConfig } from './config.js';
+import { ctx } from './context.js';
+import { runtimeSites } from './workspaces.js';
 import { USER_AGENT } from './net.js';
 
 export class WPError extends Error {
@@ -148,22 +150,30 @@ export function resetClients() {
   clients.clear();
 }
 
+/** WordPress client for a site of the current workspace only. */
 export function getClient(siteId?: string): WPClient {
-  if (config.sites.length === 0) {
-    throw new Error(`No WordPress site connected. Connect one at ${config.publicUrl ?? ''}/admin (or set WP_URL/WP_USER/WP_APP_PASSWORD).`);
+  const ws = ctx().workspaceId;
+  const sites = runtimeSites(ws);
+  if (sites.length === 0) {
+    throw new Error(`No WordPress site connected to this account. Connect one in the portal (${config.publicUrl ?? ''}/admin) or with the Code & Blocks MCP Bridge plugin.`);
   }
-  const site = siteId ? config.sites.find((s) => s.id === siteId) : config.sites[0];
+  const site = siteId ? sites.find((s) => s.id === siteId) : sites[0];
   if (!site) {
-    throw new Error(`Unknown site "${siteId}". Available: ${config.sites.map((s) => s.id).join(', ')}`);
+    throw new Error(`Unknown site "${siteId}". Available: ${sites.map((s) => s.id).join(', ')}`);
   }
-  let client = clients.get(site.id);
+  const key = `${ws}:${site.id}`;
+  let client = clients.get(key);
   if (!client) {
     client = new WPClient(site);
-    clients.set(site.id, client);
+    clients.set(key, client);
   }
   return client;
 }
 
 export function allSiteHosts(): string[] {
-  return config.sites.map((s) => new URL(s.url).hostname);
+  return runtimeSites(ctx().workspaceId).map((s) => new URL(s.url).hostname);
+}
+
+export function currentSites() {
+  return runtimeSites(ctx().workspaceId);
 }

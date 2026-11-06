@@ -19,6 +19,7 @@ final class CBMCP_Admin {
 	public static function init() {
 		add_action( 'admin_menu', array( __CLASS__, 'menu' ) );
 		add_action( 'admin_post_cbmcp_save_settings', array( __CLASS__, 'save_settings' ) );
+		add_action( 'admin_post_cbmcp_connect', array( __CLASS__, 'connect' ) );
 		add_action( 'admin_post_cbmcp_disconnect', array( __CLASS__, 'disconnect' ) );
 		add_action( 'admin_post_cbmcp_snippet', array( __CLASS__, 'snippet_action' ) );
 		add_action( 'admin_post_cbmcp_restore', array( __CLASS__, 'restore_backup' ) );
@@ -118,6 +119,30 @@ final class CBMCP_Admin {
 		self::back( $tab, __( 'Gespeichert.', 'cb-mcp-bridge' ) );
 	}
 
+	/** Save the server address and hand the connection code to the server (auto-submitted form, code is not stored). */
+	public static function connect() {
+		self::check( 'cbmcp_connect' );
+		$url  = isset( $_POST['server_url'] ) ? untrailingslashit( esc_url_raw( trim( wp_unslash( $_POST['server_url'] ) ) ) ) : ''; // phpcs:ignore
+		$code = isset( $_POST['code'] ) ? preg_replace( '/[^A-Za-z0-9-]/', '', wp_unslash( $_POST['code'] ) ) : ''; // phpcs:ignore
+		if ( ! $url || 'https' !== wp_parse_url( $url, PHP_URL_SCHEME ) ) {
+			self::back( 'connection', __( 'Die Server-Adresse muss mit https:// beginnen.', 'cb-mcp-bridge' ), 'error' );
+		}
+		if ( strlen( $code ) < 12 ) {
+			self::back( 'connection', __( 'Bitte einen gültigen Verbindungscode eingeben.', 'cb-mcp-bridge' ), 'error' );
+		}
+		CBMCP_Settings::update( array( 'server_url' => $url ) );
+		nocache_headers();
+		header( 'Referrer-Policy: no-referrer' );
+		echo '<!doctype html><html><head><meta charset="utf-8"><title>Code &amp; Blocks MCP</title></head><body>';
+		echo '<form id="cbmcp" method="post" action="' . esc_url( $url . '/connect/start' ) . '">';
+		echo '<input type="hidden" name="site" value="' . esc_attr( home_url( '/' ) ) . '">';
+		echo '<input type="hidden" name="code" value="' . esc_attr( $code ) . '">';
+		echo '<input type="hidden" name="return" value="' . esc_attr( self::url( 'connection' ) ) . '">';
+		echo '<noscript><button>' . esc_html__( 'Weiter zum MCP-Server', 'cb-mcp-bridge' ) . '</button></noscript></form>';
+		echo '<script>document.getElementById("cbmcp").submit();</script></body></html>';
+		exit;
+	}
+
 	public static function disconnect() {
 		self::check( 'cbmcp_disconnect' );
 		$n = 0;
@@ -196,6 +221,9 @@ final class CBMCP_Admin {
 			$type = ( isset( $_GET['cbmcp_type'] ) && 'error' === $_GET['cbmcp_type'] ) ? 'error' : 'success'; // phpcs:ignore
 			echo '<div class="notice notice-' . esc_attr( $type ) . ' is-dismissible"><p>' . esc_html( rawurldecode( wp_unslash( $_GET['cbmcp_msg'] ) ) ) . '</p></div>'; // phpcs:ignore
 		}
+		if ( isset( $_GET['cbmcp_error'] ) ) { // phpcs:ignore
+			echo '<div class="notice notice-error is-dismissible"><p>' . esc_html( wp_unslash( $_GET['cbmcp_error'] ) ) . '</p></div>'; // phpcs:ignore
+		}
 		if ( isset( $_GET['cbmcp_connected'] ) ) { // phpcs:ignore
 			echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Verbunden. Claude kann jetzt über deinen MCP-Server auf diese Seite zugreifen.', 'cb-mcp-bridge' ) . '</p></div>';
 		}
@@ -242,25 +270,29 @@ final class CBMCP_Admin {
 		echo '</div>';
 
 		echo '<div class="cbmcp-card"><h2>' . esc_html__( 'MCP-Server', 'cb-mcp-bridge' ) . '</h2>';
-		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">';
-		wp_nonce_field( 'cbmcp_save_settings' );
-		echo '<input type="hidden" name="action" value="cbmcp_save_settings"><input type="hidden" name="tab" value="connection">';
-		echo '<label for="cbmcp-server" class="cbmcp-label">' . esc_html__( 'Adresse deines MCP-Servers', 'cb-mcp-bridge' ) . '</label>';
-		echo '<div class="cbmcp-row"><input id="cbmcp-server" type="url" name="server_url" class="regular-text" placeholder="https://wp-mcp.example.com" value="' . esc_attr( $server ) . '"> <button class="button">' . esc_html__( 'Speichern', 'cb-mcp-bridge' ) . '</button></div>';
-		echo '</form>';
-		if ( $server ) {
-			$connect = add_query_arg(
+		if ( $server && $conns ) {
+			$portal = add_query_arg(
 				array(
-					'site'   => rawurlencode( home_url( '/' ) ),
-					'return' => rawurlencode( self::url( 'connection' ) ),
+					'site'    => rawurlencode( home_url( '/' ) ),
+					'purpose' => 'portal',
 				),
-				$server . '/admin/connect'
+				$server . '/sso/start'
 			);
-			echo '<p><a class="button button-primary button-hero" href="' . esc_url( $connect ) . '">' . ( $conns ? esc_html__( 'Neu verbinden', 'cb-mcp-bridge' ) : esc_html__( 'Mit MCP-Server verbinden', 'cb-mcp-bridge' ) ) . '</a></p>';
-			echo '<p class="description">' . esc_html__( 'Du meldest dich am Server an, bestätigst danach hier in WordPress die Freigabe und landest wieder auf dieser Seite. Es wird ein Anwendungspasswort für deinen Benutzer erstellt, das du jederzeit widerrufen kannst.', 'cb-mcp-bridge' ) . '</p>';
-			echo '<p class="description">' . esc_html__( 'Connector-Adresse für Claude:', 'cb-mcp-bridge' ) . ' <code>' . esc_html( $server . '/mcp' ) . '</code></p>';
+			echo '<p><a class="button button-primary button-hero" href="' . esc_url( $portal ) . '" target="_blank" rel="noopener">' . esc_html__( 'Portal öffnen', 'cb-mcp-bridge' ) . '</a></p>';
+			echo '<p class="description">' . esc_html__( 'Im Portal siehst du Aktivität, Freigaben und Updates und verwaltest Datenschutz, API-Keys und Tokens. Die Anmeldung läuft über dein WordPress-Konto.', 'cb-mcp-bridge' ) . '</p>';
+			echo '<p class="description">' . esc_html__( 'Connector-Adresse für deine KI (z. B. Claude):', 'cb-mcp-bridge' ) . ' <code>' . esc_html( $server . '/mcp' ) . '</code></p>';
+			echo '<hr>';
 		}
-		echo '</div>';
+		echo '<form method="post" action="' . esc_url( admin_url( 'admin-post.php' ) ) . '">';
+		wp_nonce_field( 'cbmcp_connect' );
+		echo '<input type="hidden" name="action" value="cbmcp_connect">';
+		echo '<p><label for="cbmcp-server" class="cbmcp-label">' . esc_html__( 'Adresse des MCP-Servers', 'cb-mcp-bridge' ) . '</label>';
+		echo '<input id="cbmcp-server" type="url" name="server_url" class="regular-text" placeholder="https://wp-mcp.example.com" value="' . esc_attr( $server ) . '" required></p>';
+		echo '<p><label for="cbmcp-code" class="cbmcp-label">' . esc_html__( 'Verbindungscode', 'cb-mcp-bridge' ) . '</label>';
+		echo '<input id="cbmcp-code" type="text" name="code" class="regular-text" placeholder="CBX-XXXX-XXXX-XXXX" autocomplete="off" required></p>';
+		echo '<p><button class="button ' . ( $conns ? '' : 'button-primary' ) . '">' . ( $conns ? esc_html__( 'Neu verbinden', 'cb-mcp-bridge' ) : esc_html__( 'Verbinden', 'cb-mcp-bridge' ) ) . '</button></p>';
+		echo '<p class="description">' . esc_html__( 'Server-Adresse und Code bekommst du von deinem Betreiber. Danach bestätigst du hier in WordPress die Freigabe für „Code & Blocks MCP“. Dabei entsteht ein Anwendungspasswort für deinen Benutzer, das du jederzeit widerrufen kannst. Der Code wird nicht gespeichert.', 'cb-mcp-bridge' ) . '</p>';
+		echo '</form></div>';
 
 		$info = CBMCP_Bridge::route_info();
 		echo '<div class="cbmcp-card"><h2>' . esc_html__( 'System', 'cb-mcp-bridge' ) . '</h2><table class="cbmcp-kv">';
