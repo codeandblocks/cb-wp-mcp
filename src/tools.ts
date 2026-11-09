@@ -6,7 +6,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { APP_NAME, APP_VERSION, config } from './config.js';
 import { allSiteHosts, currentSites, getClient, WPError, type Query, type WPClient } from './wp.js';
-import { readLimited, safeFetch, USER_AGENT } from './net.js';
+import { guardedFetch, readLimited, safeFetch, USER_AGENT } from './net.js';
 import { registerExtraTools, trackUnsplashDownload } from './extras.js';
 import { record } from './activity.js';
 import { gate, needsApproval } from './approvals.js';
@@ -590,7 +590,7 @@ export function buildServer(): McpServer {
       let contentType = a.mime_type as string | undefined;
 
       if (a.source_url) {
-        const res = await safeFetch(a.source_url, {}, allSiteHosts());
+        const res = await safeFetch(a.source_url, {});
         if (!res.ok) throw new Error(`Download failed: HTTP ${res.status}`);
         data = await readLimited(res, config.maxUploadBytes);
         contentType = contentType ?? res.headers.get('content-type')?.split(';')[0] ?? undefined;
@@ -762,7 +762,7 @@ export function buildServer(): McpServer {
       const url = new URL(a.path, `${wp.site.url}/`);
       if (url.hostname !== wp.host) throw new Error(`Only URLs on ${wp.host} are allowed`);
       if (a.bust_cache) url.searchParams.set('cbmcp_nocache', Date.now().toString(36));
-      const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(45_000) });
+      const res = await guardedFetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(45_000) }, { sameHost: true });
       const html = await res.text();
       const title = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1];
       let body = html;

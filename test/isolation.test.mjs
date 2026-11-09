@@ -13,6 +13,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import http from 'node:http';
 import { startMockWordPress } from './mock-wordpress.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,6 +24,8 @@ let proc;
 let dataDir;
 let wpA;
 let wpB;
+let internal;
+let internalHits = 0;
 
 /** Tiny browser: cookie jar + manual redirects. */
 function browser() {
@@ -83,7 +86,11 @@ async function ownerCsrf() {
 async function connectWithCode(code, wp, user, password) {
   const b = browser();
   let res = await b.form(`${SERVER}/connect/start`, { site: wp.base, code, return: `${wp.base}/wp-admin/admin.php?page=cbmcp&tab=connection` });
-  assert.equal(res.status, 303, await res.clone().text());
+  const html = await res.text();
+  assert.equal(res.status, 200, html);
+  const state = html.match(/name="state" value="([^"]+)"/)[1];
+  res = await b.form(`${SERVER}/connect/confirm`, { state });
+  assert.equal(res.status, 303);
   const authorize = new URL(res.headers.get('location'));
   const success = new URL(authorize.searchParams.get('success_url'));
   success.searchParams.set('user_login', user);
@@ -92,13 +99,25 @@ async function connectWithCode(code, wp, user, password) {
   return res;
 }
 
+async function customerPortal(wp) {
+  const b = browser();
+  const res = await b.follow(`${SERVER}/sso/start?site=${encodeURIComponent(wp.base)}&purpose=portal`);
+  return { b, html: await res.text() };
+}
+
 before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cbmcp-test-'));
-  wpA = await startMockWordPress({ port: PORT + 1, name: 'alpha', user: 'anna', password: 'aaaa bbbb cccc', serverUrl: SERVER });
+  internal = http.createServer((_req, res) => {
+    internalHits++;
+    res.end('INTERNAL-SECRET');
+  });
+  await new Promise((r) => internal.listen(PORT + 3, '127.0.0.1', r));
+  // "localhost" is a different host name than the sites' 127.0.0.1 – like an internal service
+  wpA = await startMockWordPress({ port: PORT + 1, name: 'alpha', user: 'anna', password: 'aaaa bbbb cccc', serverUrl: SERVER, internalUrl: `http://localhost:${PORT + 3}` });
   wpB = await startMockWordPress({ port: PORT + 2, name: 'beta', user: 'bert', password: 'dddd eeee ffff', serverUrl: SERVER });
   proc = spawn(process.execPath, ['--no-warnings=ExperimentalWarning', 'dist/index.js'], {
     cwd: ROOT,
-    env: { ...process.env, PORT: String(PORT), PUBLIC_URL: SERVER, ADMIN_PASSWORD, DATA_DIR: dataDir, APPROVAL_WAIT_SECONDS: '1', MCP_TOKEN: '', WP_URL: '' },
+    env: { ...process.env, PORT: String(PORT), PUBLIC_URL: SERVER, ADMIN_PASSWORD, DATA_DIR: dataDir, APPROVAL_WAIT_SECONDS: '1', MCP_TOKEN: '', WP_URL: '', ALLOW_PRIVATE_FETCH: 'true' },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let log = '';
@@ -124,13 +143,12 @@ before(async () => {
   // each customer connects their site with their own code
   assert.equal((await connectWithCode(ctx.codes.a, wpA, 'anna', 'aaaa bbbb cccc')).status, 303);
   assert.equal((await connectWithCode(ctx.codes.b, wpB, 'bert', 'dddd eeee ffff')).status, 303);
-  // operator creates one token per customer (via "open workspace")
-  for (const key of ['a', 'b']) {
-    await owner.form(`${SERVER}/admin/switch`, { csrf: await ownerCsrf(), ws: ctx.ws[key] });
-    const html = await (await owner.form(`${SERVER}/admin/settings/token`, { csrf: await ownerCsrf(), label: `test-${key}` })).text();
-    ctx.tokens[key] = html.match(/<code id="tok">([^<]+)<\/code>/)[1];
+  // each customer signs in with WordPress and creates a token for their AI
+  for (const [key, wp] of [['a', wpA], ['b', wpB]]) {
+    const { b, html } = await customerPortal(wp);
+    const out = await (await b.form(`${SERVER}/admin/settings/token`, { csrf: csrfOf(html), label: `test-${key}`, days: '30' })).text();
+    ctx.tokens[key] = out.match(/<code id="tok">([^<]+)<\/code>/)[1];
   }
-  await owner.form(`${SERVER}/admin/switch`, { csrf: await ownerCsrf(), ws: 'intern' });
   const listA = JSON.parse((await call(ctx.tokens.a, 'list_sites')).text);
   const listB = JSON.parse((await call(ctx.tokens.b, 'list_sites')).text);
   ctx.sites.a = listA.sites[0].id;
@@ -139,12 +157,69 @@ before(async () => {
 
 after(() => {
   proc?.kill();
+  internal?.close();
   wpA?.server.close();
   wpB?.server.close();
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
 // ---------- tests ----------
+
+test('connecting needs a confirmation in the same browser', async () => {
+  // attacker starts with their own code, the victim's browser never confirmed
+  const attacker = browser();
+  const res = await attacker.form(`${SERVER}/connect/start`, { site: wpA.base, code: ctx.codes.a });
+  const html = await res.text();
+  assert.match(html, /Kunde Alpha/, 'confirmation page names the target account');
+  const state = html.match(/name="state" value="([^"]+)"/)[1];
+  const victim = browser();
+  const r = await victim.form(`${SERVER}/connect/confirm`, { state });
+  assert.equal(r.status, 400);
+});
+
+test('WordPress REST redirects to another host are blocked', async () => {
+  const before = internalHits;
+  const r = await call(ctx.tokens.a, 'rest_request', { path: '/wp/v2/redirect-test' });
+  assert.ok(r.isError);
+  assert.match(r.text, /Blocked redirect/);
+  assert.doesNotMatch(r.text, /INTERNAL-SECRET/);
+  assert.equal(internalHits, before);
+});
+
+test('front-end redirects to another host are blocked (fetch_page, audit_page)', async () => {
+  const before = internalHits;
+  for (const tool of ['fetch_page', 'audit_page']) {
+    const r = await call(ctx.tokens.a, tool, { path: '/go/' });
+    assert.ok(r.isError, tool);
+    assert.doesNotMatch(r.text, /INTERNAL-SECRET/);
+  }
+  assert.equal(internalHits, before);
+});
+
+test('free REST writes need approval', async () => {
+  const r = await call(ctx.tokens.a, 'rest_request', { method: 'DELETE', path: '/wp/v2/posts/1', query: { force: true } });
+  assert.match(r.text, /APPROVAL REQUIRED/);
+});
+
+test('personal-data gate catches embeds and form tables', async () => {
+  assert.match((await call(ctx.tokens.a, 'rest_request', { path: '/wp/v2/posts', query: { _embed: 1 } })).text, /switched off/);
+  assert.match((await call(ctx.tokens.a, 'db_query', { sql: 'SELECT * FROM {prefix}fluentform_submissions LIMIT 5' })).text, /switched off/);
+  assert.doesNotMatch((await call(ctx.tokens.a, 'db_query', { sql: 'SELECT ID, menu_order FROM {prefix}posts ORDER BY menu_order' })).text, /switched off/);
+});
+
+test('operator view of a customer area is read-only', async () => {
+  await owner.form(`${SERVER}/admin/switch`, { csrf: await ownerCsrf(), ws: ctx.ws.b });
+  const res = await owner.form(`${SERVER}/admin/privacy`, { csrf: await ownerCsrf(), retention: '30' });
+  assert.match(decodeURIComponent(res.headers.get('location') ?? ''), /nur lesend/);
+  const tok = await owner.form(`${SERVER}/admin/settings/token`, { csrf: await ownerCsrf(), label: 'owner-sneak' });
+  assert.equal(tok.status, 303);
+  await owner.form(`${SERVER}/admin/switch`, { csrf: await ownerCsrf(), ws: 'intern' });
+  const { b } = await customerPortal(wpB);
+  const priv = await (await b.req(`${SERVER}/admin/privacy`)).text();
+  assert.match(priv, /value="90" selected/);
+  const settings = await (await b.req(`${SERVER}/admin/settings`)).text();
+  assert.doesNotMatch(settings, /owner-sneak/);
+});
 
 test('wrong connection code is rejected', async () => {
   const res = await browser().form(`${SERVER}/connect/start`, { site: wpA.base, code: 'CBX-AAAA-BBBB-CCCC' });

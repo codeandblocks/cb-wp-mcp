@@ -5,7 +5,7 @@
 import { config, type SiteConfig } from './config.js';
 import { ctx } from './context.js';
 import { runtimeSites } from './workspaces.js';
-import { USER_AGENT } from './net.js';
+import { USER_AGENT, guardedFetch } from './net.js';
 
 export class WPError extends Error {
   constructor(
@@ -88,12 +88,12 @@ export class WPClient {
     const url = this.buildUrl(path, opts.query, opts.rawQuery);
     let res: Response;
     try {
-      res = await fetch(url, {
+      res = await guardedFetch(url, {
         method,
         headers,
         body,
         signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
-      });
+      }, { sameHost: true });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       throw new WPError(0, 'network_error', `Cannot reach ${this.site.url}: ${msg}`);

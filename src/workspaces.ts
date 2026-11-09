@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { config, type SiteConfig } from './config.js';
 import { all, get, getMeta, run, setMeta, tx } from './db.js';
-import { ctx } from './context.js';
+import { ctx, maybeCtx } from './context.js';
 import { randomToken, seal, sha256, unseal, type Enc } from './crypto.js';
 
 export const OWNER_WS = 'intern';
@@ -28,6 +28,7 @@ export const APPROVAL_TOOLS: Record<string, string> = {
   manage_option: 'Optionen löschen',
   send_test_email: 'E-Mails senden',
   run_ability: 'Abilities mit Schreibzugriff ausführen',
+  rest_request: 'Freie REST-Anfragen mit Schreibzugriff (POST, PUT, PATCH, DELETE)',
 };
 
 /** Tools the owner can block for a workspace. */
@@ -69,7 +70,7 @@ export interface WsCaps {
 
 const DEFAULT_SETTINGS: WsSettings = {
   readOnly: false,
-  approvals: { enabled: true, tools: ['delete_content', 'manage_plugin', 'activate_theme', 'apply_copy', 'file_delete', 'db_query', 'manage_updates'] },
+  approvals: { enabled: true, tools: ['delete_content', 'manage_plugin', 'activate_theme', 'apply_copy', 'file_delete', 'db_query', 'manage_updates', 'rest_request'] },
   pii: { mask: true, allowPersonalData: false },
   retentionDays: 90,
 };
@@ -200,7 +201,24 @@ export function deleteWorkspaceRows(id: string) {
 
 // ---------- settings & caps ----------
 
+function memo<T>(key: string, wsId: string, load: () => T): T {
+  const c = maybeCtx();
+  if (!c || c.workspaceId !== wsId) return load();
+  c.memo ??= new Map();
+  if (!c.memo.has(key)) c.memo.set(key, load());
+  return c.memo.get(key) as T;
+}
+
+function forget(wsId: string) {
+  const c = maybeCtx();
+  if (c && c.workspaceId === wsId) c.memo?.clear();
+}
+
 export function getSettings(wsId = ctx().workspaceId): WsSettings {
+  return memo('settings', wsId, () => loadSettings(wsId));
+}
+
+function loadSettings(wsId: string): WsSettings {
   const r = get<{ settings: string }>('SELECT settings FROM workspaces WHERE id = :id', { id: wsId });
   const s = r ? (JSON.parse(r.settings) as Partial<WsSettings>) : {};
   return {
@@ -216,16 +234,20 @@ export function updateSettings(wsId: string, patch: Partial<WsSettings>) {
   next.approvals.tools = next.approvals.tools.filter((t) => t in APPROVAL_TOOLS);
   next.retentionDays = [30, 90, 180, 365].includes(next.retentionDays) ? next.retentionDays : 90;
   run('UPDATE workspaces SET settings = :s, updated_at = :t WHERE id = :id', { id: wsId, s: JSON.stringify(next), t: nowIso() });
+  forget(wsId);
 }
 
 export function getCaps(wsId = ctx().workspaceId): WsCaps {
-  const r = get<{ caps: string }>('SELECT caps FROM workspaces WHERE id = :id', { id: wsId });
-  return { ...DEFAULT_CAPS, ...(r ? (JSON.parse(r.caps) as Partial<WsCaps>) : {}) };
+  return memo('caps', wsId, () => {
+    const r = get<{ caps: string }>('SELECT caps FROM workspaces WHERE id = :id', { id: wsId });
+    return { ...DEFAULT_CAPS, ...(r ? (JSON.parse(r.caps) as Partial<WsCaps>) : {}) };
+  });
 }
 
 export function updateCaps(wsId: string, caps: WsCaps) {
   const clean: WsCaps = { forceReadOnly: Boolean(caps.forceReadOnly), blockedTools: caps.blockedTools.filter((t) => t in BLOCKABLE_TOOLS) };
   run('UPDATE workspaces SET caps = :c, updated_at = :t WHERE id = :id', { id: wsId, c: JSON.stringify(clean), t: nowIso() });
+  forget(wsId);
 }
 
 export function isReadOnly(wsId = ctx().workspaceId): boolean {
@@ -373,24 +395,28 @@ export function removeSite(wsId: string, id: string): boolean {
 
 // ---------- static tokens (Claude Code, scripts) ----------
 
-export function createStaticToken(wsId: string, label: string, actor: string): string {
+export const TOKEN_DAYS = [30, 90, 180, 365];
+
+export function createStaticToken(wsId: string, label: string, actor: string, days = 365): string {
   const token = `cbx_${randomToken(32)}`;
-  run('INSERT INTO tokens (hash, workspace_id, kind, actor, label, hint, created_at) VALUES (:h, :ws, \'static\', :actor, :label, :hint, :t)', {
+  const d = TOKEN_DAYS.includes(days) ? days : 365;
+  run('INSERT INTO tokens (hash, workspace_id, kind, actor, label, hint, expires_at, created_at) VALUES (:h, :ws, \'static\', :actor, :label, :hint, :exp, :t)', {
     h: sha256(token),
     ws: wsId,
     actor,
     label: label.slice(0, 60) || 'Token',
     hint: `${token.slice(0, 8)}…${token.slice(-4)}`,
+    exp: Math.floor(Date.now() / 1000) + d * 86400,
     t: nowIso(),
   });
   return token;
 }
 
 export function listStaticTokens(wsId: string) {
-  return all<{ hash: string; label: string; hint: string; created_at: string; actor: string }>(
-    "SELECT hash, label, hint, created_at, actor FROM tokens WHERE workspace_id = :ws AND kind = 'static' ORDER BY created_at DESC",
+  return all<{ hash: string; label: string; hint: string; created_at: string; actor: string; expires_at: number | null; last_used_at: number | null }>(
+    "SELECT hash, label, hint, created_at, actor, expires_at, last_used_at FROM tokens WHERE workspace_id = :ws AND kind = 'static' ORDER BY created_at DESC",
     { ws: wsId },
-  ).map((t) => ({ id: t.hash.slice(0, 16), label: t.label, hint: t.hint, created: t.created_at, actor: t.actor }));
+  ).map((t) => ({ id: t.hash.slice(0, 16), label: t.label, hint: t.hint, created: t.created_at, actor: t.actor, expires: t.expires_at ?? undefined, lastUsed: t.last_used_at ?? undefined }));
 }
 
 export function deleteStaticToken(wsId: string, id: string) {
@@ -411,6 +437,14 @@ export function initWorkspaces() {
   }
   migrateFromV12();
   importEnvSites();
+  // 1.3.1: free REST requests with write access need approval (closes a bypass of the other approvals).
+  if (!getMeta('v131_rest_approval')) {
+    for (const w of all<{ id: string }>('SELECT id FROM workspaces')) {
+      const st = getSettings(w.id);
+      if (!st.approvals.tools.includes('rest_request')) updateSettings(w.id, { approvals: { ...st.approvals, tools: [...st.approvals.tools, 'rest_request'] } });
+    }
+    setMeta('v131_rest_approval', nowIso());
+  }
 }
 
 function importEnvSites() {

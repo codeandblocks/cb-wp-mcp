@@ -157,6 +157,11 @@ const MIGRATIONS: string[] = [
     PRIMARY KEY (workspace_id, token)
   );
   `,
+  // 2 – 1.3.1: last use of tokens, expiry for static tokens
+  `
+  ALTER TABLE tokens ADD COLUMN last_used_at INTEGER;
+  UPDATE tokens SET expires_at = CAST(strftime('%s','now') AS INTEGER) + 365 * 86400 WHERE kind = 'static' AND expires_at IS NULL;
+  `,
 ];
 
 function migrate() {

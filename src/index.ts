@@ -23,7 +23,7 @@ import { adminRouter, createSession } from './admin.js';
 import { resetClients } from './wp.js';
 import { runWith, type Ctx } from './context.js';
 import { finishSso, SsoError, startSso } from './sso.js';
-import { authorizeUrl, discover, newConnectState, publicHttps, safeReturn, takeConnectState, verifyCredentials } from './connect.js';
+import { authorizeUrl, discover, newConnectState, peekConnectState, publicHttps, safeReturn, takeConnectState, verifyCredentials } from './connect.js';
 
 initDb();
 initWorkspaces();
@@ -33,7 +33,7 @@ onChange(resetClients);
 
 const page = (title: string, body: string) =>
   `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title>
-<style>:root{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;background:#f6f5f2;color:#1d1d1b;padding:16px}@media (prefers-color-scheme:dark){body{background:#141413;color:#ecebe7}}.c{max-width:480px}a{color:#2f5d50}</style></head><body><div class="c"><h1 style="font-size:22px">${title}</h1>${body}<p style="font-size:12px;opacity:.6">Code &amp; Blocks by Marijan</p></div></body></html>`;
+<style>:root{color-scheme:light dark}body{word-break:break-word;margin:0;min-height:100vh;display:grid;place-items:center;font:16px/1.5 system-ui,sans-serif;background:#f6f5f2;color:#1d1d1b;padding:16px}@media (prefers-color-scheme:dark){body{background:#141413;color:#ecebe7}}.c{max-width:480px}a{color:#2f5d50}</style></head><body><div class="c"><h1 style="font-size:22px">${title}</h1>${body}<p style="font-size:12px;opacity:.6">Code &amp; Blocks by Marijan</p></div></body></html>`;
 const escHtml = (v: unknown) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 const app = express();
@@ -146,9 +146,30 @@ app.post('/connect/start', connectLimiter, express.urlencoded({ extended: false,
   const existing = siteByUrl(d.url);
   if (existing && existing.workspaceId !== w.id) return void fail('Diese Seite ist bereits mit einem anderen Konto verbunden.', 409);
   const binding = crypto.randomBytes(16).toString('hex');
-  const state = newConnectState({ workspaceId: w.id, url: d.url, name: d.name, restBase: d.restBase, returnUrl: safeReturn(String(req.body.return ?? ''), d.url), binding });
+  const state = newConnectState({ workspaceId: w.id, workspaceName: w.name, url: d.url, name: d.name, restBase: d.restBase, returnUrl: safeReturn(String(req.body.return ?? ''), d.url), binding, authUrl: d.authUrl });
   res.cookie(CONNECT_COOKIE, binding, { httpOnly: true, secure: (config.publicUrl ?? '').startsWith('https://'), sameSite: 'lax', path: '/connect', maxAge: 20 * 60 * 1000 });
-  res.redirect(303, authorizeUrl(d, `${config.publicUrl}/connect/callback?state=${state}`));
+  // Confirmation step: the user must see which account the site is connected to.
+  // A third party cannot complete it: it needs this browser's cookie and the state id.
+  res.send(
+    page(
+      'Seite verbinden',
+      `<p>Die WordPress-Seite</p><p><strong>${escHtml(d.url)}</strong></p><p>wird mit dem Konto</p><p><strong>${escHtml(w.name)}</strong></p><p>auf ${escHtml(config.publicUrl)} verbunden. Dieses Konto kann danach mit einer KI auf die Seite zugreifen.</p>
+<p>Stimmt das Konto nicht oder hast du die Verbindung nicht selbst gestartet, brich hier ab.</p>
+<form method="post" action="/connect/confirm" style="display:flex;gap:10px;flex-wrap:wrap"><input type="hidden" name="state" value="${escHtml(state)}">
+<button style="padding:10px 16px;border:0;border-radius:8px;background:#2f5d50;color:#fff;font-weight:600;cursor:pointer">Ja, weiter zu WordPress</button>
+<a href="${escHtml(safeReturn(String(req.body.return ?? ''), d.url) ?? d.url)}" style="padding:10px 16px">Abbrechen</a></form>`,
+    ),
+  );
+});
+
+app.post('/connect/confirm', connectLimiter, express.urlencoded({ extended: false, limit: '2kb' }), (req, res) => {
+  const id = String(req.body.state ?? '');
+  const st = peekConnectState(id);
+  const binding = readCookie(req, CONNECT_COOKIE);
+  if (!st || !st.authUrl || !binding || binding !== st.binding) {
+    return void res.status(400).send(page('Verbinden nicht möglich', '<p>Die Verbindungsanfrage ist abgelaufen oder wurde in einem anderen Browser gestartet. Bitte im Plugin erneut auf „Verbinden“ klicken.</p>'));
+  }
+  res.redirect(303, authorizeUrl({ url: st.url, authUrl: st.authUrl, restBase: st.restBase }, `${config.publicUrl}/connect/callback?state=${id}`));
 });
 
 app.get('/connect/callback', connectLimiter, async (req, res) => {

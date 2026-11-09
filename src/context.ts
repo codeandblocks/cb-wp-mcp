@@ -14,6 +14,8 @@ export interface Ctx {
   /** Who acts, e.g. "owner", "maria@kunde.at (WordPress)", "token:Claude Code" */
   actor: string;
   via: 'mcp' | 'ui';
+  /** Per-request cache (settings, caps) – filled lazily. */
+  memo?: Map<string, unknown>;
 }
 
 const als = new AsyncLocalStorage<Ctx>();

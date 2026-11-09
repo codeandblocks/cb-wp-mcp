@@ -276,6 +276,8 @@ ${totp ? '<label for="otp">Code aus der Authenticator-App</label><input id="otp"
     if (r.kind === 'access' && r.expires_at < now()) throw new InvalidTokenError('Invalid or expired access token');
     const role = r.workspace_id === OWNER_WS ? 'owner' : 'customer';
     if (r.kind === 'static') {
+      if (r.expires_at && r.expires_at < now()) throw new InvalidTokenError('Token expired');
+      if (!r.last_used_at || r.last_used_at < now() - 300) run('UPDATE tokens SET last_used_at = :t WHERE hash = :h', { t: now(), h: r.hash });
       return { token, clientId: 'static-token', scopes: ['mcp'], expiresAt: now() + 3600, extra: extra({ workspaceId: r.workspace_id, actor: `Token „${r.label}“`, role }) };
     }
     return {

@@ -19,9 +19,18 @@ export interface Enc {
 let key: Buffer | undefined;
 
 function loadKey(): Buffer {
-  if (config.secretKey) return crypto.createHash('sha256').update(config.secretKey).digest();
   const f = path.join(config.dataDir, 'secret.key');
   try {
+    if (config.secretKey && fs.existsSync(f)) {
+      const fileKey = fs.readFileSync(f, 'utf8').trim();
+      const envKey = /^[0-9a-f]{64}$/i.test(config.secretKey) ? config.secretKey.toLowerCase() : crypto.createHash('sha256').update(config.secretKey).digest('hex');
+      if (fileKey.toLowerCase() !== envKey) console.error('[crypto] SECRET_KEY does not match /data/secret.key – stored credentials cannot be decrypted. Set SECRET_KEY to the content of secret.key.');
+    }
+    if (config.secretKey) {
+      // 64 hex characters = the content of secret.key (lets you move the key out of the data volume)
+      if (/^[0-9a-f]{64}$/i.test(config.secretKey)) return Buffer.from(config.secretKey, 'hex');
+      return crypto.createHash('sha256').update(config.secretKey).digest();
+    }
     if (fs.existsSync(f)) return Buffer.from(fs.readFileSync(f, 'utf8').trim(), 'hex');
     fs.mkdirSync(config.dataDir, { recursive: true });
     const k = crypto.randomBytes(32);
@@ -67,5 +76,7 @@ export function safeEqual(a: string, b: string): boolean {
   const hb = crypto.createHash('sha256').update(b).digest();
   return crypto.timingSafeEqual(ha, hb);
 }
+
+export const keyInDataVolume = () => !config.secretKey;
 
 export const randomToken = (bytes = 32) => crypto.randomBytes(bytes).toString('base64url');

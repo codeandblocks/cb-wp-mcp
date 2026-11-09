@@ -26,7 +26,7 @@ KI des Kunden ──HTTPS──► MCP-Server (Coolify, Docker) ──REST API +
 
 | Rolle | Anmeldung | Sieht und verwaltet |
 |---|---|---|
-| Betreiber | `ADMIN_PASSWORD` + Zwei-Faktor-Code | Kunden anlegen und löschen, Grenzen pro Kunde, Skills, Zugriffsprotokoll aller Bereiche, eigener Bereich „Code & Blocks (intern)“ |
+| Betreiber | `ADMIN_PASSWORD` + Zwei-Faktor-Code | Kunden anlegen und löschen, Grenzen pro Kunde, Skills, Zugriffsprotokoll aller Bereiche, eigener Bereich „Code & Blocks (intern)“. Kundenbereiche nur lesend. |
 | Kunde | mit seinem WordPress-Administratorkonto | nur den eigenen Bereich: Seiten, Freigaben, Aktivität, Updates, Einstellungen, Datenschutz, Tokens, Export, Konto löschen |
 
 Kunden brauchen kein eigenes Passwort. Jeder Administrator einer verbundenen Seite kann sich am Portal und aus seiner KI anmelden.
@@ -37,11 +37,11 @@ Kunden brauchen kein eigenes Passwort. Jeder Administrator einer verbundenen Sei
 
 1. **Betreiber:** In `/admin` unter **Kunden** einen Kunden anlegen. Es erscheint ein Verbindungscode (`CBX-…`), nur einmal sichtbar.
 2. Dem Kunden schicken: Server-Adresse, Verbindungscode und das Plugin `code-blocks-mcp-bridge.zip`.
-3. **Kunde:** Plugin installieren, unter **Code & Blocks MCP → Verbindung** Server-Adresse und Code eintragen, **Verbinden** klicken und in WordPress die Freigabe bestätigen.
+3. **Kunde:** Plugin installieren, unter **Code & Blocks MCP → Verbindung** Server-Adresse und Code eintragen und **Verbinden** klicken. Der Server zeigt, mit welchem Konto die Seite verbunden wird. Nach „Ja, weiter“ bestätigt der Kunde in WordPress die Freigabe.
 4. **Kunde:** Im Plugin **Portal öffnen** klicken. Dort Datenschutz, Freigaben und ggf. eigene Pexels-/Unsplash-Keys einstellen.
 5. **Kunde verbindet seine KI:**
    - Claude (Web, Desktop, Mobil): eigener Connector mit `https://<server>/mcp`, Anmeldung „Mit WordPress anmelden“ und die Adresse seiner Seite eingeben.
-   - Claude Code: im Portal unter Einstellungen einen Token erzeugen, der fertige Befehl wird angezeigt.
+   - Claude Code: im Portal unter Einstellungen einen Token erzeugen (gültig 30 bis 365 Tage), der fertige Befehl wird angezeigt.
 
 Weitere Seiten desselben Kunden: im Portal unter **Seiten** oder mit demselben Code im Plugin der anderen Seite. Den Code kann der Betreiber jederzeit erneuern oder abschalten.
 
@@ -54,7 +54,9 @@ Weitere Seiten desselben Kunden: im Portal unter **Seiten** oder mit demselben C
 - Pexels- und Unsplash-Keys sind pro Kunde. Keys aus Umgebungsvariablen gelten nur für den Betreiber.
 - **Grenzen pro Kunde** (Betreiber): „Nur lesen“ erzwingen und einzelne Tools sperren. Gesperrte Tools sieht die KI gar nicht erst. Der Kunde kann zusätzlich verschärfen, aber nicht lockern.
 - Skills sind reine Textanleitungen. Sie werden nie ausgeführt, die KI kann sie nicht ändern, und sie heben keine Grenze und keine Freigabe auf. Das setzt der Server durch.
-- `npm test` prüft die Trennung automatisch mit zwei nachgebauten WordPress-Seiten (13 Tests).
+- Der Betreiber kann in einen Kundenbereich hineinsehen, aber dort nichts ändern. Einstellungen, Datenschutz, Tokens und Freigaben entscheidet der Kunde.
+- **Ausgehende Anfragen** (WordPress-Seiten, Bilder, Bild-APIs) laufen über eine Schutzschicht: Interne Adressen (localhost, private Netze, Docker-Netz, Cloud-Metadaten) werden beim Verbindungsaufbau gesperrt, auch bei DNS-Tricks. Weiterleitungen von WordPress-Seiten sind nur auf denselben Host erlaubt. Ein Kunde kann den Server also nicht dazu bringen, andere Dienste auf dem VPS abzufragen.
+- `npm test` prüft Trennung, Schutz vor internen Adressen, Freigaben und Datenschutz automatisch (32 Tests).
 
 ---
 
@@ -63,7 +65,7 @@ Weitere Seiten desselben Kunden: im Portal unter **Seiten** oder mit demselben C
 Details für Auftragsverarbeitungsverträge (Datenarten, Speicherorte, Fristen, technische und organisatorische Maßnahmen) stehen in [`docs/DATENSCHUTZ.md`](docs/DATENSCHUTZ.md). Kurz:
 
 - **Pseudonymisierung** (Standard: an): E-Mail-Adressen, Telefonnummern und IP-Adressen gehen nur als Platzhalter `[[pii:…]]` an die KI. Schreibt die KI einen Platzhalter zurück, setzt der Server den Originalwert ein. Die Zuordnung ist verschlüsselt, gilt pro Kunde und 24 Stunden.
-- **Sperre für personenbezogene Daten** (Standard: gesperrt): Benutzerlisten, Kommentare, Bestellungen, Kunden- und Formulardaten sind für die KI gesperrt, bis der Kunde sie freigibt.
+- **Sperre für personenbezogene Daten** (Standard: gesperrt): Benutzerlisten, Kommentare, Bestellungen, Kunden-, Mitglieder- und Formulardaten sind für die KI gesperrt, bis der Kunde sie freigibt. Die Sperre arbeitet mit Namensmustern (Endpunkte, Tabellen, Abilities) und ist deshalb bestmöglich, nicht lückenlos. Die Pseudonymisierung greift zusätzlich immer.
 - **Datensparsame Protokolle:** keine Inhalte, keine Empfänger, keine SQL-Werte.
 - **Löschfristen:** Aktivität 30/90/180/365 Tage (Kunde wählt), Freigaben 30 Tage, Zugriffsprotokoll 365 Tage, Platzhalter 24 Stunden. Abgelaufenes wird täglich gelöscht.
 - **Zugriffsprotokoll:** Anmeldungen, verbundene KI-Clients, Exporte und jeder Zugriff des Betreibers auf einen Kundenbereich. Der Kunde sieht seinen Teil im Portal.
@@ -84,9 +86,13 @@ Details für Auftragsverarbeitungsverträge (Datenarten, Speicherorte, Fristen, 
    | `PUBLIC_URL` | `https://wp-mcp.deinedomain.de` |
    | `ADMIN_PASSWORD` | langes Passwort (mind. 12 Zeichen) |
 
-3. **Persistent Storage** auf `/data`. Dort liegen Datenbank und Schlüssel.
+3. **Persistent Storage** auf `/data`. Dort liegen die Datenbank und anfangs der Schlüssel (`secret.key`). Den Schlüssel danach aus dem Volume holen, siehe „Sicherung“.
 4. **Healthcheck**: Pfad `/health`, Host `127.0.0.1`, Port 3000.
 5. Nach dem ersten Login unter **Sicherheit** die Zwei-Faktor-Anmeldung einschalten.
+
+### Update auf 1.3.1
+
+Keine Schritte nötig. Bestehende feste Tokens bekommen eine Gültigkeit von 365 Tagen, und „Freie REST-Anfragen mit Schreibzugriff“ wird in allen Konten freigabepflichtig (abschaltbar unter Einstellungen). Das Plugin bleibt bei 1.3.0.
 
 ### Update von 1.2
 
@@ -96,7 +102,13 @@ Plugin auf den Seiten auf **1.3** aktualisieren. Ohne 1.3 funktioniert „Anmeld
 
 ### Sicherung
 
-`/data` regelmäßig sichern, z. B. mit der Volume-Sicherung von Coolify. `secret.key` getrennt aufbewahren: Ohne den Schlüssel sind die gespeicherten Zugangsdaten nicht lesbar. Alternativ `SECRET_KEY` setzen und den Wert im Passwortmanager hinterlegen.
+`/data` regelmäßig sichern, z. B. mit der Volume-Sicherung von Coolify. Den Schlüssel getrennt halten, sonst enthält jede Sicherung auch den Schlüssel:
+
+1. Im Terminal des Containers `cat /data/secret.key` ausführen, den Wert im Passwortmanager speichern.
+2. In Coolify `SECRET_KEY` mit genau diesem Wert (64 Hex-Zeichen) setzen und neu deployen.
+3. Prüfen, ob alle Seiten erreichbar sind, dann `rm /data/secret.key`.
+
+Die Seite **Sicherheit** in der Oberfläche zeigt, ob der Schlüssel noch im Volume liegt.
 
 ---
 
@@ -104,13 +116,14 @@ Plugin auf den Seiten auf **1.3** aktualisieren. Ohne 1.3 funktioniert „Anmeld
 
 | Variable | Zweck |
 |---|---|
-| `SECRET_KEY` | Eigener Schlüssel statt `/data/secret.key` |
+| `SECRET_KEY` | Schlüssel statt `/data/secret.key`. 64 Hex-Zeichen werden direkt verwendet (Inhalt von `secret.key`), alles andere wird gehasht |
 | `MCP_TOKEN` | Fester Token für den Betreiber-Bereich |
 | `WP_URL`, `WP_USER`, `WP_APP_PASSWORD`, `WP_SITES` | Seiten per Variable, werden einmalig in den Betreiber-Bereich übernommen |
 | `PEXELS_API_KEY`, `UNSPLASH_ACCESS_KEY` | Bild-Keys, nur für den Betreiber-Bereich |
 | `READ_ONLY` | `true` erzwingt „Nur lesen“ für alle |
+| `ALLOW_PRIVATE_FETCH` | `true` erlaubt Anfragen an interne Adressen und `http://`-Seiten. Nur für lokale Tests, nie im Betrieb |
 | `APPROVAL_WAIT_SECONDS` | Wartezeit auf Freigaben (Standard 40) |
-| `ACCESS_TOKEN_TTL_HOURS`, `REFRESH_TOKEN_TTL_DAYS`, `MAX_UPLOAD_MB`, `MAX_OUTPUT_CHARS`, `TRUST_PROXY`, `ALLOW_PRIVATE_FETCH`, `ALLOW_TOKEN_IN_URL` | Feineinstellungen |
+| `ACCESS_TOKEN_TTL_HOURS`, `REFRESH_TOKEN_TTL_DAYS`, `MAX_UPLOAD_MB`, `MAX_OUTPUT_CHARS`, `TRUST_PROXY`, `ALLOW_TOKEN_IN_URL` | Feineinstellungen |
 
 ---
 

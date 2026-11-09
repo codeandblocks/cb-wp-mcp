@@ -5,7 +5,8 @@
  * Downloads triggered by tools (e.g. "upload this image from URL") must not
  * reach internal services on the VPS (Coolify, databases, metadata APIs).
  */
-import dns from 'node:dns/promises';
+import dnsCb from 'node:dns';
+import { Agent, fetch as undiciFetch } from 'undici';
 import net from 'node:net';
 import { config } from './config.js';
 
@@ -35,36 +36,91 @@ export function isPrivateIp(ip: string): boolean {
   return /^(fc|fd|fe8|fe9|fea|feb|ff)/.test(v6);
 }
 
-async function assertPublic(url: URL, trustedHosts: Set<string>): Promise<void> {
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Unsupported protocol ${url.protocol}`);
-  if (config.allowPrivateFetch || trustedHosts.has(url.hostname.toLowerCase())) return;
+/**
+ * DNS lookup used for every outgoing connection: refuses private/internal
+ * addresses at connect time (also protects against DNS rebinding).
+ */
+function guardedLookup(hostname: string, options: any, cb: (...args: any[]) => void) {
+  const opts = typeof options === 'object' && options !== null ? options : { family: options };
+  dnsCb.lookup(hostname, { ...opts, all: true }, (err, addrs) => {
+    if (err) return cb(err);
+    const list = (Array.isArray(addrs) ? addrs : [addrs]) as { address: string; family: number }[];
+    if (!config.allowPrivateFetch && (list.length === 0 || list.some((a) => isPrivateIp(a.address)))) {
+      const e = new Error(`Refusing to connect to ${hostname}: resolves to a private/internal address`) as NodeJS.ErrnoException;
+      e.code = 'EPRIVATEADDR';
+      return cb(e);
+    }
+    if (opts.all) return cb(null, list);
+    return cb(null, list[0].address, list[0].family);
+  });
+}
+
+const agent = new Agent({ connect: { lookup: guardedLookup as any }, headersTimeout: 60_000, bodyTimeout: 120_000 });
+
+export class BlockedRequestError extends Error {}
+
+function assertAllowedUrl(url: URL) {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new BlockedRequestError(`Unsupported protocol ${url.protocol}`);
+  if (url.username || url.password) throw new BlockedRequestError('URLs with credentials are not allowed');
   const host = url.hostname.replace(/^\[|\]$/g, '');
-  const addresses = net.isIP(host) ? [host] : (await dns.lookup(host, { all: true })).map((a) => a.address);
-  if (addresses.length === 0 || addresses.some(isPrivateIp)) {
-    throw new Error(`Refusing to fetch ${url.hostname}: resolves to a private/internal address`);
+  // IP literals skip DNS lookup, so check them here.
+  if (!config.allowPrivateFetch && (net.isIP(host) ? isPrivateIp(host) : /^localhost$|\.localhost$|\.internal$|\.local$/i.test(host))) {
+    throw new BlockedRequestError(`Refusing to connect to ${url.hostname}: private/internal address`);
   }
 }
 
-/** fetch() that validates every redirect hop against private address ranges. */
-export async function safeFetch(rawUrl: string, init: RequestInit = {}, trustedHosts: string[] = []): Promise<Response> {
-  const trusted = new Set(trustedHosts.map((h) => h.toLowerCase()));
-  let url = new URL(rawUrl);
-  for (let hop = 0; hop < 6; hop++) {
-    await assertPublic(url, trusted);
-    const res = await fetch(url, {
-      ...init,
+const bareHost = (h: string) => h.toLowerCase().replace(/^www\./, '');
+
+export interface GuardOptions {
+  /** Only follow redirects to the same host (www. variant allowed), never downgrade https → http. */
+  sameHost?: boolean;
+  maxRedirects?: number;
+}
+
+/**
+ * The only way this server talks to the outside world: blocks private and
+ * internal addresses on every hop (checked at connect time) and validates
+ * each redirect itself instead of letting fetch follow it.
+ */
+export async function guardedFetch(rawUrl: string | URL, init: RequestInit = {}, opts: GuardOptions = {}): Promise<Response> {
+  const origin = new URL(String(rawUrl));
+  let url = origin;
+  let method = (init.method ?? 'GET').toUpperCase();
+  let body = init.body;
+  const headers: Record<string, string> = { 'User-Agent': USER_AGENT, ...(init.headers as Record<string, string> | undefined) };
+  for (let hop = 0; hop <= (opts.maxRedirects ?? 5); hop++) {
+    assertAllowedUrl(url);
+    const res = (await undiciFetch(url, {
+      method,
+      headers,
+      body: body as any,
       redirect: 'manual',
-      headers: { 'User-Agent': USER_AGENT, ...(init.headers as Record<string, string> | undefined) },
+      dispatcher: agent,
       signal: init.signal ?? AbortSignal.timeout(60_000),
-    });
+    })) as unknown as Response;
     const location = res.headers.get('location');
-    if (res.status >= 300 && res.status < 400 && location) {
-      url = new URL(location, url);
-      continue;
+    if (res.status < 300 || res.status >= 400 || !location) return res;
+    await res.body?.cancel().catch(() => undefined);
+    const next = new URL(location, url);
+    if (opts.sameHost) {
+      if (bareHost(next.hostname) !== bareHost(origin.hostname)) throw new BlockedRequestError(`Blocked redirect from ${origin.hostname} to another host (${next.hostname})`);
+      if (origin.protocol === 'https:' && next.protocol !== 'https:') throw new BlockedRequestError('Blocked redirect from https to http');
+    } else if (next.hostname !== url.hostname) {
+      delete headers.Authorization;
+      delete headers.authorization;
     }
-    return res;
+    if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) {
+      method = 'GET';
+      body = undefined;
+    }
+    url = next;
   }
-  throw new Error('Too many redirects');
+  throw new BlockedRequestError('Too many redirects');
+}
+
+/** Download from a public URL (no credentials, any host, private addresses blocked). */
+export function safeFetch(rawUrl: string, init: RequestInit = {}): Promise<Response> {
+  return guardedFetch(rawUrl, init, { sameHost: false });
 }
 
 /** Read a response body into a Buffer, aborting above maxBytes. */

@@ -23,7 +23,7 @@ import { deleteSkill, loadSkills, saveSkill } from './extras.js';
 import { APP_PASSWORD_ID, APP_PASSWORD_NAME, authorizeUrl, discover, newConnectState, publicHttps, safeReturn, takeConnectState, verifyCredentials } from './connect.js';
 import { disableOwnerTotp, enableOwnerTotp, newTotpSecret, ownerTotpEnabled, ownerTotpSecret, totpQrSvg, verifyTotp } from './totp.js';
 import { maskText } from './pii.js';
-import { safeEqual } from './crypto.js';
+import { keyInDataVolume, safeEqual } from './crypto.js';
 
 // ---------- helpers ----------
 
@@ -159,7 +159,7 @@ function layout(req: Request, title: string, body: string, opts: { refresh?: num
       ? `<form class="wsbox" method="post" action="/admin/switch"><input type="hidden" name="csrf" value="${esc(s.csrf)}"><span class="muted">Ansicht</span>
 <select name="ws" onchange="this.form.submit()">${ws.listWorkspaces().map((w) => `<option value="${esc(w.id)}"${w.id === s.workspaceId ? ' selected' : ''}>${esc(w.name)}</option>`).join('')}</select></form>`
       : `<div class="wsbox"><span class="muted">Konto</span><br><strong>${esc(cur?.name)}</strong><br><span class="muted small">${esc(s.actor)}</span></div>`;
-  const banner = s.role === 'owner' && s.workspaceId !== ws.OWNER_WS ? `<div class="banner">Du siehst den Bereich des Kunden <strong>${esc(cur?.name)}</strong>. Dieser Zugriff wird im Zugriffsprotokoll des Kunden vermerkt.</div>` : '';
+  const banner = s.role === 'owner' && s.workspaceId !== ws.OWNER_WS ? `<div class="banner">Du siehst den Bereich des Kunden <strong>${esc(cur?.name)}</strong>. Nur lesend. Dieser Zugriff wird im Zugriffsprotokoll des Kunden vermerkt.</div>` : '';
   return `<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${esc(title)} – ${esc(APP_NAME)}</title>${opts.refresh ? `<meta http-equiv="refresh" content="${opts.refresh}">` : ''}<style>${CSS}</style></head>
 <body><div class="shell"><aside><div class="brand">Code &amp; Blocks MCP<small>${s.role === 'owner' ? 'Betreiber' : 'Kundenportal'} · ${esc(APP_VERSION)}</small></div>${switcher}${nav(req, s)}
@@ -415,6 +415,12 @@ ${
     if (req.method !== 'GET') {
       const token = (req.body && req.body.csrf) || req.get('x-csrf-token');
       if (!token || !safeEqual(String(token), s.csrf)) return void res.status(403).send('Ungültiges Formular (CSRF). Bitte Seite neu laden.');
+    }
+    // The operator may look into a customer's area, but never change anything there:
+    // settings, privacy choices, tokens and approvals are the customer's decisions.
+    if (s.role === 'owner' && s.workspaceId !== ws.OWNER_WS && req.method !== 'GET' && !['/switch', '/logout'].includes(req.path) && !/^\/(customers|skills|security)(\/|$)/.test(req.path)) {
+      if (req.path.startsWith('/api/')) return void res.status(403).json({ error: 'Betreiber-Ansicht ist nur lesend.' });
+      return void back(res, '/admin', 'Die Betreiber-Ansicht eines Kundenbereichs ist nur lesend. Änderungen nimmt der Kunde selbst vor.', 'warn');
     }
     runWith({ workspaceId: s.workspaceId, role: s.role, actor: s.actor, via: 'ui' }, next);
   });
@@ -752,8 +758,8 @@ ${caps.blockedTools.length ? `<p class="small muted">Vom Betreiber gesperrt: ${c
 <label class="check"><input type="checkbox" name="clear" value="1"> Gespeicherte Keys löschen</label>
 <p><button>Speichern</button></p></form>
 <div class="card"><h2>Tokens für Claude Code und Skripte</h2><p class="small muted">Für Clients ohne Anmeldeseite: <code>Authorization: Bearer &lt;Token&gt;</code>. Jeder Token gilt nur für dieses Konto.</p>
-${tokens.length ? `<table><thead><tr><th>Name</th><th>Token</th><th>Erstellt</th><th></th></tr></thead><tbody>${tokens.map((t) => `<tr><td>${esc(t.label)}</td><td><code>${esc(t.hint)}</code></td><td class="small">${esc(fmtDate(t.created))}</td><td><form method="post" action="/admin/settings/token/delete" onsubmit="return confirm('Token löschen?')">${csrfField(req)}<input type="hidden" name="id" value="${esc(t.id)}"><button class="sm danger">Löschen</button></form></td></tr>`).join('')}</tbody></table>` : ''}
-<form method="post" action="/admin/settings/token" class="row" style="margin-top:10px">${csrfField(req)}<input type="text" name="label" placeholder="Name, z. B. Claude Code Laptop" style="max-width:320px"><button>Token erzeugen</button></form></div>
+${tokens.length ? `<table><thead><tr><th>Name</th><th>Token</th><th>Erstellt</th><th>Zuletzt benutzt</th><th>Läuft ab</th><th></th></tr></thead><tbody>${tokens.map((t) => `<tr><td>${esc(t.label)}</td><td><code>${esc(t.hint)}</code></td><td class="small">${esc(fmtDate(t.created))}</td><td class="small">${esc(fmtDate(t.lastUsed))}</td><td class="small">${t.expires && t.expires * 1000 < Date.now() ? '<span class="pill err">abgelaufen</span>' : esc(fmtDate(t.expires))}</td><td><form method="post" action="/admin/settings/token/delete" onsubmit="return confirm('Token löschen?')">${csrfField(req)}<input type="hidden" name="id" value="${esc(t.id)}"><button class="sm danger">Löschen</button></form></td></tr>`).join('')}</tbody></table>` : ''}
+<form method="post" action="/admin/settings/token" class="row" style="margin-top:10px">${csrfField(req)}<input type="text" name="label" placeholder="Name, z. B. Claude Code Laptop" style="max-width:300px"><select name="days" style="max-width:160px">${ws.TOKEN_DAYS.map((d) => `<option value="${d}"${d === 90 ? ' selected' : ''}>gültig ${d} Tage</option>`).join('')}</select><button>Token erzeugen</button></form></div>
 <div class="card"><h2>Verbundene KI-Clients</h2>${clients.length ? `<table><thead><tr><th>Client</th><th>Angemeldet als</th><th>Sitzungen</th></tr></thead><tbody>${clients.map((c) => `<tr><td>${esc(c.name)}</td><td class="small">${esc(c.actor)}</td><td>${c.sessions}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Keine aktiven Sitzungen.</p>'}
 <form method="post" action="/admin/settings/sessions/revoke" onsubmit="return confirm('Alle KI-Clients abmelden?')" style="margin-top:12px">${csrfField(req)}<button class="sm danger">Alle abmelden</button></form></div>`,
     );
@@ -788,7 +794,7 @@ ${tokens.length ? `<table><thead><tr><th>Name</th><th>Token</th><th>Erstellt</th
   r.post('/settings/token', (req, res) => {
     const s = session(req)!;
     const label = String(req.body.label ?? '').trim() || 'Token';
-    const token = ws.createStaticToken(s.workspaceId, label, s.actor);
+    const token = ws.createStaticToken(s.workspaceId, label, s.actor, Number(req.body.days) || 90);
     activity.logAccess({ workspaceId: s.workspaceId, actor: s.actor, action: 'token_erstellt', ip: req.ip, detail: label });
     res.send(settingsPage(req, token));
   });
@@ -942,7 +948,7 @@ ${w.codeHint ? `<form method="post" action="/admin/customers/${esc(id)}/code/off
         .map(([k, label]) => `<label class="check"><input type="checkbox" name="block_${esc(k)}" value="1"${caps.blockedTools.includes(k) ? ' checked' : ''}> <span>${esc(label)} <code class="small">${esc(k)}</code></span></label>`)
         .join('')}</div><p><button class="primary">Grenzen speichern</button></p></form>
 <div class="card"><h2>Seiten</h2>${sites.length ? `<table><tbody>${sites.map((x) => `<tr><td>${esc(x.name)}</td><td class="small muted">${esc(x.url)}</td><td class="small">${esc(x.user)}</td></tr>`).join('')}</tbody></table>` : '<p class="muted">Noch keine Seite verbunden.</p>'}</div>
-<div class="card"><h2>Bereich öffnen</h2><p class="small muted">Zeigt das Portal dieses Kunden (Aktivität, Freigaben, Einstellungen). Der Zugriff wird im Zugriffsprotokoll des Kunden vermerkt.</p>
+<div class="card"><h2>Bereich öffnen</h2><p class="small muted">Zeigt das Portal dieses Kunden nur lesend (Aktivität, Freigaben, Einstellungen). Der Zugriff wird im Zugriffsprotokoll des Kunden vermerkt.</p>
 <form method="post" action="/admin/switch">${csrfField(req)}<input type="hidden" name="ws" value="${esc(id)}"><button>Als Betreiber öffnen</button></form></div>
 <div class="card"><h2>Kunden löschen</h2><p class="small muted">Trennt alle Seiten (Anwendungspasswörter werden widerrufen) und löscht alle Daten dieses Kunden. Ein Löschnachweis bleibt.</p>
 <form method="post" action="/admin/customers/${esc(id)}/delete">${csrfField(req)}<div class="field" style="max-width:420px"><label for="c">Zur Bestätigung den Namen eingeben: <code>${esc(w.name)}</code></label><input id="c" type="text" name="confirm" autocomplete="off" required></div><button class="danger">Endgültig löschen</button></form></div>`,
@@ -1019,6 +1025,12 @@ ${w.codeHint ? `<form method="post" action="/admin/customers/${esc(id)}/code/off
             ? `<p><span class="pill ok">aktiv</span> Bei jeder Betreiber-Anmeldung (Portal und KI-Client) wird zusätzlich ein Code abgefragt.</p>
 <form method="post" action="/admin/security/totp/off" class="row" onsubmit="return confirm('Zwei-Faktor-Anmeldung abschalten?')">${csrfField(req)}<input type="text" name="otp" inputmode="numeric" placeholder="aktueller Code" required style="max-width:160px"><button class="danger">Abschalten</button></form>`
             : setup
+        }</div>
+<div class="card"><h2>Schlüssel für die Verschlüsselung</h2>${
+          keyInDataVolume()
+            ? `<p><span class="pill wait">im Datenvolume</span> Der Schlüssel liegt in <code>${esc(config.dataDir)}/secret.key</code>, also im selben Volume wie die verschlüsselten Daten. Wer eine Sicherung von <code>/data</code> bekommt, hat damit auch den Schlüssel.</p>
+<p class="small">So trennst du ihn ab:</p><ol class="small"><li>In Coolify im Terminal des Containers <code>cat /data/secret.key</code> ausführen und den Wert in den Passwortmanager kopieren.</li><li>In Coolify die Umgebungsvariable <code>SECRET_KEY</code> mit genau diesem Wert anlegen und neu deployen.</li><li>Prüfen, ob alle Seiten erreichbar sind, dann <code>rm /data/secret.key</code> ausführen.</li></ol>`
+            : '<p><span class="pill ok">getrennt</span> Der Schlüssel kommt aus der Umgebungsvariable <code>SECRET_KEY</code>.</p>'
         }</div>
 <div class="card"><h2>Server</h2><table><tbody><tr><th>Version</th><td>${esc(APP_VERSION)}</td></tr><tr><th>Öffentliche Adresse</th><td>${esc(config.publicUrl)}</td></tr><tr><th>Daten</th><td><code>${esc(config.dataDir)}</code> · Zugangsdaten und Keys AES-256-GCM-verschlüsselt</td></tr></tbody></table></div>`,
       ),

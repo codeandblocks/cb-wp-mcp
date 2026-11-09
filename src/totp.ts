@@ -51,7 +51,7 @@ export function totpAt(secret: string, counter: number): string {
   return code.padStart(6, '0');
 }
 
-let lastUsed = 0;
+const lastUsed = () => Number(getMeta('owner_totp_last') ?? 0);
 
 export function verifyTotp(secret: string, code: string): boolean {
   const c = code.replace(/\s+/g, '');
@@ -59,9 +59,9 @@ export function verifyTotp(secret: string, code: string): boolean {
   const now = Math.floor(Date.now() / 30000);
   for (const d of [0, -1, 1]) {
     const counter = now + d;
-    if (counter <= lastUsed) continue; // no replay
+    if (counter <= lastUsed()) continue; // no replay (persisted across restarts)
     if (crypto.timingSafeEqual(Buffer.from(totpAt(secret, counter)), Buffer.from(c))) {
-      lastUsed = counter;
+      setMeta('owner_totp_last', String(counter));
       return true;
     }
   }

@@ -8,7 +8,7 @@
  */
 import crypto from 'node:crypto';
 import { config } from './config.js';
-import { USER_AGENT } from './net.js';
+import { USER_AGENT, guardedFetch } from './net.js';
 import { WPClient } from './wp.js';
 
 export const APP_PASSWORD_NAME = 'Code & Blocks MCP';
@@ -28,11 +28,11 @@ export async function discover(rawUrl: string): Promise<Discovered> {
   } catch {
     throw new Error('Ungültige Adresse.');
   }
-  const local = ['localhost', '127.0.0.1'].includes(u.hostname);
-  if (u.protocol !== 'https:' && !local) throw new Error('Die Seite muss über HTTPS erreichbar sein (Anwendungspasswörter verlangen HTTPS).');
+  // Plain http only for local tests (ALLOW_PRIVATE_FETCH); private addresses are blocked by guardedFetch.
+  if (u.protocol !== 'https:' && !config.allowPrivateFetch) throw new Error('Die Seite muss über HTTPS erreichbar sein (Anwendungspasswörter verlangen HTTPS).');
   const base = `${u.origin}${u.pathname.replace(/\/+$/, '')}`;
   const tryIndex = async (url: string) => {
-    const r = await fetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) });
+    const r = await guardedFetch(url, { headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) }, { sameHost: true });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     return (await r.json()) as any;
   };
@@ -93,6 +93,10 @@ export interface ConnectState {
   returnUrl?: string;
   /** Session id (logged-in flow) or browser cookie value (code flow). */
   binding: string;
+  /** WordPress authorization URL (code flow, after confirmation) */
+  authUrl?: string;
+  /** Name of the target account, shown on the confirmation page */
+  workspaceName?: string;
   expires: number;
 }
 
@@ -102,6 +106,11 @@ export function newConnectState(s: Omit<ConnectState, 'expires'>): string {
   const id = crypto.randomBytes(16).toString('hex');
   connectStates.set(id, { ...s, expires: Date.now() + 20 * 60 * 1000 });
   return id;
+}
+
+export function peekConnectState(id: string): ConnectState | undefined {
+  const s = connectStates.get(id);
+  return s && s.expires > Date.now() ? s : undefined;
 }
 
 export function takeConnectState(id: string): ConnectState | undefined {

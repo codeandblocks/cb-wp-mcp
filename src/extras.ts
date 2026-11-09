@@ -13,7 +13,7 @@ import { parse, type HTMLElement } from 'node-html-parser';
 import { config } from './config.js';
 import { currentSites, getClient } from './wp.js';
 import { getKey, isReadOnly } from './workspaces.js';
-import { USER_AGENT } from './net.js';
+import { USER_AGENT, guardedFetch } from './net.js';
 import type { Handler, ToolOpts } from './tools.js';
 import { gate, toolGated } from './approvals.js';
 
@@ -212,7 +212,7 @@ const PLACEHOLDERS: [RegExp, string][] = [
 
 async function auditPage(url: URL) {
   const started = Date.now();
-  const res = await fetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(45_000) });
+  const res = await guardedFetch(url, { headers: { 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(45_000) }, { sameHost: true });
   const html = await res.text();
   const ms = Date.now() - started;
   const root = parse(html, { comment: false, blockTextElements: { script: false, style: false, noscript: false, pre: true } });
@@ -350,7 +350,7 @@ export async function trackUnsplashDownload(location: string): Promise<void> {
   const u = new URL(location);
   if (u.hostname !== 'api.unsplash.com' || !getKey('unsplash')) return;
   try {
-    await fetch(u, { headers: { Authorization: `Client-ID ${getKey('unsplash')}`, 'Accept-Version': 'v1' }, signal: AbortSignal.timeout(15_000) });
+    await guardedFetch(u, { headers: { Authorization: `Client-ID ${getKey('unsplash')}`, 'Accept-Version': 'v1' }, signal: AbortSignal.timeout(15_000) });
   } catch {
     /* tracking is best effort */
   }
@@ -376,7 +376,7 @@ async function searchPexels(q: { query: string; orientation?: string; per_page: 
   u.searchParams.set('page', String(q.page));
   if (q.orientation) u.searchParams.set('orientation', q.orientation);
   if (q.locale) u.searchParams.set('locale', q.locale);
-  const res = await fetch(u, { headers: { Authorization: getKey('pexels') ?? '', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) });
+  const res = await guardedFetch(u, { headers: { Authorization: getKey('pexels') ?? '', 'User-Agent': USER_AGENT }, signal: AbortSignal.timeout(20_000) });
   if (!res.ok) throw new Error(`Pexels: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
   const data: any = await res.json();
   return (data.photos ?? []).map((p: any) => ({
@@ -406,7 +406,7 @@ async function searchUnsplash(q: { query: string; orientation?: string; per_page
   u.searchParams.set('page', String(q.page));
   u.searchParams.set('content_filter', 'high');
   if (q.orientation) u.searchParams.set('orientation', q.orientation === 'square' ? 'squarish' : q.orientation);
-  const res = await fetch(u, {
+  const res = await guardedFetch(u, {
     headers: { Authorization: `Client-ID ${getKey('unsplash')}`, 'Accept-Version': 'v1', 'User-Agent': USER_AGENT },
     signal: AbortSignal.timeout(20_000),
   });

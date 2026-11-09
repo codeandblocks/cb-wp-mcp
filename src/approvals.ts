@@ -43,6 +43,7 @@ const CONDITIONS: Record<string, (a: any) => boolean> = {
   manage_option: (a) => a.action === 'delete',
   send_test_email: () => true,
   run_ability: () => false, // gated inside run_ability once the ability's annotations are known
+  rest_request: (a) => String(a.method ?? 'GET').toUpperCase() !== 'GET',
 };
 
 function rowTo(r: any): Approval {

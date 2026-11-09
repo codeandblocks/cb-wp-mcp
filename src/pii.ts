@@ -7,9 +7,11 @@
  *    reach the AI. When the AI writes a token back (e.g. when it edits a page
  *    that contains a contact address), the server puts the original value
  *    back. Mapping: encrypted, per workspace, 24 h.
- * 2. Personal-data gate: endpoints and tables that mainly contain personal
- *    data (users, comments, orders, form entries …) are blocked until the
- *    customer allows access in the portal.
+ * 2. Personal-data gate (best effort): endpoints, tables and abilities that
+ *    mainly contain personal data (users, comments, orders, form entries …)
+ *    are blocked until the customer allows access in the portal. It works with
+ *    name patterns, so unusual plugins can slip through – the pseudonymisation
+ *    in 1. still applies to everything.
  */
 import { all, run } from './db.js';
 import { ctx } from './context.js';
@@ -120,25 +122,58 @@ export function unmaskDeep<T>(value: T, wsId = ctx().workspaceId): T {
 const PII_REST = [
   /^\/wp\/v2\/users(?!\/me(?:\/|$|\?))/i,
   /^\/wp\/v2\/comments/i,
-  /^\/wc\/v\d\/(orders|customers|refunds)/i,
+  /^\/wc\/v\d\/(orders|customers|refunds|subscriptions|memberships|reports\/customers)/i,
   /^\/wc-analytics\/(customers|reports\/customers|orders)/i,
   /^\/wc\/store/i,
-  /^\/(fluentform|wpforms|gf|frm|ninja-forms|sureforms|srfm|edd|affwp|flamingo|cartflows)[^/]*\//i,
+  /^\/(fluentform|wpforms|gf|frm|ninja-forms|sureforms|srfm|edd|affwp|flamingo|cartflows|mailpoet|newsletter|mc4wp|fluent-crm|fluentcrm|bp|buddypress|pmpro|mepr|learnpress|tutor|wpcf7)[^/]*\//i,
+  // generic: endpoints that list people or their submissions, whatever the plugin is called
+  /\/(subscribers?|subscriptions?|members?|memberships?|leads?|contacts?|customers?|entries|entry|submissions?|applicants?|bookings?|registrations?|attendees?|participants?|donors?|donations?)(\/|$|\?)/i,
 ];
 
-const PII_TABLES =
-  /\b\w*(users|usermeta|comments|commentmeta|wc_orders|wc_order_addresses|wc_customer_lookup|woocommerce_order_items|fluentform_submissions|fluentform_entry_details|frm_items|frm_item_metas|wpforms_entr\w*|srfm_entries|nf3_\w*|edd_customers|edd_orders|edd_order_addresses|affiliate_wp_\w*|cartflows_ca_\w*|simple_history\w*|gf_entry\w*)\b/i;
+/** Table names that mainly hold personal data (checked against the tables a query reads). */
+const PII_TABLE_NAME =
+  /^\w*?(users|usermeta|comments|commentmeta|wc_orders\w*|wc_order_addresses|wc_customer_lookup|woocommerce_order\w*|fluentform_submissions|fluentform_entry_details|frm_items|frm_item_metas|wpforms_entr\w*|srfm_entries|nf3_\w*|edd_customers|edd_orders|edd_order_addresses|affiliate_wp_\w*|cartflows_ca_\w*|simple_history\w*|gf_entry\w*|\w*(subscriber|subscription|member|lead|contact|customer|entries|entry|submission|applicant|booking|registration|attendee|participant|donor|donation|order)s?)$/i;
+
+/** Table names a SELECT/UPDATE/… reads or writes (FROM, JOIN, INTO, UPDATE, comma lists). */
+export function tablesIn(sql: string): string[] {
+  const clean = sql.replace(/\{prefix\}/g, 'wp_').replace(/'(?:[^'\\]|\\.)*'/g, "''").replace(/"(?:[^"\\]|\\.)*"/g, '""');
+  const out: string[] = [];
+  const re = /\b(?:from|join|into|update|table|describe|desc)\s+((?:`?[\w$]+`?(?:\.`?[\w$]+`?)?\s*(?:(?:as\s+)?(?!where|on|join|left|right|inner|outer|cross|group|order|limit|having|union|set|values|select)\w+\s*)?,\s*)*`?[\w$]+`?(?:\.`?[\w$]+`?)?)/gi;
+  for (const m of clean.matchAll(re)) {
+    for (const part of m[1].split(',')) {
+      const name = part.trim().split(/\s+/)[0]?.replace(/`/g, '').split('.').pop();
+      if (name && !/^(select|dual)$/i.test(name)) out.push(name);
+    }
+  }
+  return out;
+}
+
+const PII_ABILITY = /(user|customer|order|comment|entr(y|ies)|submission|subscriber|member|contact|lead|booking|registration)/i;
 
 const DENIED =
   'Access to personal data (users, comments, orders, form entries …) is switched off for this workspace. ' +
-  'The site owner can allow it in the portal under Einstellungen → Datenschutz. Do not try to work around this.';
+  'The site owner can allow it in the portal under Datenschutz. Do not try to work around this.';
+
+const hasEmbed = (v: unknown) => {
+  if (!v || typeof v !== 'object') return false;
+  return Object.keys(v as object).some((k) => k === '_embed' || k === '_embedded');
+};
 
 /** Returns an error message if the call would read data that is mainly personal data. */
 export function personalDataDenied(tool: string, a: Record<string, any>, wsId = ctx().workspaceId): string | undefined {
   if (getSettings(wsId).pii.allowPersonalData) return undefined;
-  if (tool === 'rest_request' && typeof a.path === 'string' && PII_REST.some((re) => re.test(a.path))) return DENIED;
-  if (tool === 'db_query' && typeof a.sql === 'string' && PII_TABLES.test(a.sql)) return DENIED;
+  if (tool === 'rest_request') {
+    const p = String(a.path ?? '');
+    if (PII_REST.some((re) => re.test(p))) return DENIED;
+    if (/[?&]_embed/i.test(p) || hasEmbed(a.query)) return DENIED; // embeds authors and comments
+  }
+  if (tool === 'list_content' && hasEmbed(a.extra_query)) return DENIED;
+  if (tool === 'db_query' && typeof a.sql === 'string') {
+    if (tablesIn(a.sql).some((t) => PII_TABLE_NAME.test(t))) return DENIED;
+    if (/\binformation_schema\b|\bmysql\./i.test(a.sql) && /\b(user|customer|order|entr|submission|subscriber|member)/i.test(a.sql)) return DENIED;
+  }
   if (tool === 'manage_meta' && (a.object_type === 'user' || a.object_type === 'comment')) return DENIED;
-  if ((tool === 'list_content' || tool === 'get_content') && typeof a.type === 'string' && /^(users|comments|orders|shop_order)$/i.test(a.type)) return DENIED;
+  if ((tool === 'list_content' || tool === 'get_content') && typeof a.type === 'string' && /^(users|comments|orders|shop_order\w*|subscriptions?|members?|entries|submissions?)$/i.test(a.type)) return DENIED;
+  if (tool === 'run_ability' && typeof a.name === 'string' && PII_ABILITY.test(a.name)) return DENIED;
   return undefined;
 }

@@ -5,7 +5,7 @@
 import http from 'node:http';
 import crypto from 'node:crypto';
 
-export function startMockWordPress({ port, name, user, password, serverUrl }) {
+export function startMockWordPress({ port, name, user, password, serverUrl, internalUrl }) {
   const auth = 'Basic ' + Buffer.from(`${user}:${password.replace(/\s/g, '')}`).toString('base64');
   const state = { revoked: 0, writes: [], activity: [], ssoCodes: new Map(), appPasswords: [{ uuid: 'u1', app_id: '6f1c3c2e-6c2b-4e43-9d8f-2a9c0b5d7e11', name: 'Code & Blocks MCP' }] };
   const base = `http://127.0.0.1:${port}`;
@@ -23,6 +23,11 @@ export function startMockWordPress({ port, name, user, password, serverUrl }) {
         const code = crypto.randomBytes(24).toString('hex');
         state.ssoCodes.set(code, u.searchParams.get('state'));
         res.writeHead(302, { location: `${serverUrl}/sso/callback?state=${encodeURIComponent(u.searchParams.get('state'))}&code=${code}` });
+        return res.end();
+      }
+      // a hostile site redirecting the server to an internal address
+      if (u.pathname === '/go/' && internalUrl) {
+        res.writeHead(302, { location: `${internalUrl}/secret` });
         return res.end();
       }
       const p = u.pathname.replace(/^\/wp-json/, '');
@@ -58,6 +63,10 @@ export function startMockWordPress({ port, name, user, password, serverUrl }) {
         return send(200, { id: 1, status: 'publish', title: { raw: j.title ?? 'x' }, link: `${base}/kontakt/` });
       }
       if (p === '/wp/v2/posts/1' && req.method === 'DELETE') return send(200, { deleted: true });
+      if (p === '/wp/v2/redirect-test' && internalUrl) {
+        res.writeHead(302, { location: `${internalUrl}/secret` });
+        return res.end();
+      }
       if (p === '/wp/v2/comments') return send(200, [{ id: 5, author_name: 'Max', author_email: 'max@example.org', author_ip: '203.0.113.7' }]);
       send(404, { code: 'rest_no_route', message: `No route ${p}` });
     });
